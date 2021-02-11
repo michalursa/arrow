@@ -127,6 +127,15 @@ struct ARROW_EXPORT QuantileOptions : public FunctionOptions {
   enum Interpolation interpolation;
 };
 
+// TODO(michalursa) add docstring
+struct ARROW_EXPORT GroupByOptions : public FunctionOptions {
+  struct Aggregate {
+    std::string name;
+    const FunctionOptions* options;
+  };
+  std::vector<Aggregate> aggregates;
+};
+
 /// @}
 
 /// \brief Count non-null (or null) values in an array.
