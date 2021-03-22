@@ -34,6 +34,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/visitor_inline.h"
+#include "arrow/exec/groupby.h"
 
 namespace arrow {
 
@@ -425,6 +426,167 @@ struct GrouperImpl : Grouper {
   std::vector<uint8_t> key_bytes_;
   uint32_t num_groups_ = 0;
   std::vector<std::unique_ptr<KeyEncoder>> encoders_;
+};
+
+struct GrouperFastImpl : Grouper {
+  static bool CanUse(const std::vector<ValueDescr>& keys) {
+    for (size_t i = 0; i < keys.size(); ++i) {
+      const auto& key = keys[i].type;
+      if (key->id() == Type::DICTIONARY) {
+        return false;
+      }
+      if (is_large_binary_like(key->id())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static Result<std::unique_ptr<GrouperFastImpl>> Make(const std::vector<ValueDescr>& keys,
+                                                   ExecContext* ctx) {
+    auto impl = ::arrow::internal::make_unique<GrouperFastImpl>();
+    impl->ctx_ = ctx;
+    impl->non_null_buffers_maybe_null_.resize(keys.size());
+    impl->fixedlen_buffers_.resize(keys.size());
+    impl->varlen_buffer_maybe_null_.resize(keys.size());
+    impl->key_types_.resize(keys.size());
+    
+    impl->is_fixedlen_.resize(keys.size());
+    impl->col_widths_.resize(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      const auto& key = keys[i].type;
+      if (key->id() == Type::BOOL) {
+        impl->is_fixedlen_[i] = true;
+        impl->col_widths_[i] = 0;
+      } else if (is_fixed_width(key->id())) {
+        impl->is_fixedlen_[i] = true;
+        impl->col_widths_[i] = checked_cast<const FixedWidthType&>(*key).bit_width() / 8;
+      } else if (is_binary_like(key->id())) {
+        impl->is_fixedlen_[i] = false;
+        impl->col_widths_[i] = sizeof(uint32_t);
+      } else {
+        return Status::NotImplemented("Keys of type ", *key);
+      }
+      impl->key_types_[i] = key;
+    }
+
+    impl->group_map_.init(arrow::exec::util::CPUInstructionSet::avx2, ctx->memory_pool(), static_cast<uint32_t>(keys.size()), 
+      impl->is_fixedlen_, impl->col_widths_.data());
+
+    return std::move(impl);
+  }
+
+  Result<Datum> Consume(const ExecBatch& batch) override {
+    int64_t num_rows = batch.length;
+    int num_columns = batch.num_values();
+
+    std::shared_ptr<arrow::Buffer> group_ids;
+    ARROW_ASSIGN_OR_RAISE(
+        group_ids,
+        AllocateBuffer(sizeof(uint32_t) * num_rows, ctx_->memory_pool()));
+
+    for (int i = 0; i < num_columns; ++i) {
+      non_null_buffers_maybe_null_[i] = batch[i].array()->buffers[0] != NULLPTR ? batch[i].array()->buffers[0]->data() : nullptr;
+      fixedlen_buffers_[i] = batch[i].array()->buffers[1]->data();
+      if (is_fixedlen_[i]) {
+        varlen_buffer_maybe_null_[i] = nullptr;
+      } else {
+        varlen_buffer_maybe_null_[i] = batch[i].array()->buffers[2]->data();
+      }
+    }
+
+    TypedBufferBuilder<uint32_t> group_ids_batch(ctx_->memory_pool());
+    RETURN_NOT_OK(group_ids_batch.Resize(batch.length));
+
+    group_map_.push_input(
+      static_cast<uint32_t>(num_rows), 
+      non_null_buffers_maybe_null_.data(), 
+      fixedlen_buffers_.data(), 
+      varlen_buffer_maybe_null_.data(), 
+      reinterpret_cast<uint32_t*>(group_ids->mutable_data()));
+
+    return Datum(UInt32Array(batch.length, std::move(group_ids)));
+  }
+
+  uint32_t num_groups() const override { return static_cast<uint32_t>(group_map_.get_num_keys()); }
+
+  Result<ExecBatch> GetUniques() override {
+    uint64_t num_groups;
+    bool is_row_fixedlen;
+    uint32_t num_columns = static_cast<uint32_t>(col_widths_.size());
+    group_map_.pull_output_prepare(num_groups, is_row_fixedlen);
+    ExecBatch out({}, num_groups);
+    out.values.resize(num_columns);
+
+    std::vector<std::shared_ptr<Buffer>> non_null_bufs;
+    std::vector<std::shared_ptr<Buffer>> fixedlen_bufs;
+    std::vector<std::shared_ptr<Buffer>> varlen_bufs;
+    std::vector<uint8_t*> non_null_arrays;
+    std::vector<uint8_t*> fixedlen_arrays;
+    std::vector<uint8_t*> varlen_arrays;
+    std::vector<uint64_t> varlen_sizes;
+    std::vector<int> null_counts;
+    varlen_sizes.resize(num_columns);
+    non_null_bufs.resize(num_columns);
+    fixedlen_bufs.resize(num_columns);
+    varlen_bufs.resize(num_columns);
+    non_null_arrays.resize(num_columns);
+    fixedlen_arrays.resize(num_columns);
+    varlen_arrays.resize(num_columns);
+    null_counts.resize(num_columns);
+
+    for (size_t i = 0; i < num_columns; ++i) {
+      ARROW_ASSIGN_OR_RAISE(non_null_bufs[i], AllocateBitmap(num_groups, ctx_->memory_pool()));
+      non_null_arrays[i] = non_null_bufs[i]->mutable_data();
+      if (is_fixedlen_[i]) {
+        if (col_widths_[i] == 0) {
+          ARROW_ASSIGN_OR_RAISE(fixedlen_bufs[i], AllocateBitmap(num_groups, ctx_->memory_pool()));
+        } else {
+          ARROW_ASSIGN_OR_RAISE(fixedlen_bufs[i], AllocateBuffer(num_groups * col_widths_[i], ctx_->memory_pool()));
+        }
+      } else {
+          ARROW_ASSIGN_OR_RAISE(fixedlen_bufs[i], AllocateBuffer((num_groups + 1) * sizeof(uint32_t), ctx_->memory_pool()));
+      }
+      fixedlen_arrays[i] = fixedlen_bufs[i]->mutable_data();
+    }
+
+    group_map_.pull_output_fixedlen_and_nulls(non_null_arrays.data(), fixedlen_arrays.data(), varlen_sizes.data());
+
+    for (size_t i = 0; i < num_columns; ++i) {
+      null_counts[i] = static_cast<int>(num_groups) - exec::util::BitUtil::popcnt_bitvector(static_cast<int>(num_groups), non_null_arrays[i]);
+      if (!is_fixedlen_[i]) {
+        ARROW_ASSIGN_OR_RAISE(varlen_bufs[i], AllocateBuffer(varlen_sizes[i], ctx_->memory_pool()));
+        varlen_arrays[i] = varlen_bufs[i]->mutable_data();
+      } else {
+        varlen_arrays[i] = nullptr;
+      }
+    }
+
+    group_map_.pull_output_varlen(non_null_arrays.data(), fixedlen_arrays.data(), varlen_arrays.data());
+
+    for (size_t i = 0; i < num_columns; ++i) {
+      if (is_fixedlen_[i]) {
+        out.values[i] = ArrayData::Make(
+          key_types_[i], num_groups, {std::move(non_null_bufs[i]), std::move(fixedlen_bufs[i])},
+          null_counts[i]);
+      } else {
+      out.values[i] = ArrayData::Make(
+        key_types_[i], num_groups, {std::move(non_null_bufs[i]), std::move(fixedlen_bufs[i]), std::move(varlen_bufs[i])},
+        null_counts[i]);
+      }
+    }
+
+    return out;
+  }
+
+  ExecContext* ctx_;
+  exec::GroupMap group_map_;
+  std::vector<const uint8_t*> non_null_buffers_maybe_null_;
+  std::vector<const uint8_t*> fixedlen_buffers_;
+  std::vector<const uint8_t*> varlen_buffer_maybe_null_;
+  std::vector<bool> is_fixedlen_;
+  std::vector<uint32_t> col_widths_;
+  std::vector<std::shared_ptr<arrow::DataType>> key_types_;
 };
 
 /// C++ abstract base class for the HashAggregateKernel interface.
@@ -873,6 +1035,9 @@ Result<FieldVector> ResolveKernels(
 
 Result<std::unique_ptr<Grouper>> Grouper::Make(const std::vector<ValueDescr>& descrs,
                                                ExecContext* ctx) {
+  if (GrouperFastImpl::CanUse(descrs)) {
+    return GrouperFastImpl::Make(descrs, ctx);
+  }
   return GrouperImpl::Make(descrs, ctx);
 }
 
