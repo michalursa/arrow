@@ -48,8 +48,6 @@ pub struct SortExec {
     input: Arc<dyn ExecutionPlan>,
     /// Sort expressions
     expr: Vec<PhysicalSortExpr>,
-    /// Number of threads to execute input partitions on before combining into a single partition
-    concurrency: usize,
 }
 
 impl SortExec {
@@ -57,13 +55,18 @@ impl SortExec {
     pub fn try_new(
         expr: Vec<PhysicalSortExpr>,
         input: Arc<dyn ExecutionPlan>,
-        concurrency: usize,
     ) -> Result<Self> {
-        Ok(Self {
-            expr,
-            input,
-            concurrency,
-        })
+        Ok(Self { expr, input })
+    }
+
+    /// Input schema
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    /// Sort expressions
+    pub fn expr(&self) -> &[PhysicalSortExpr] {
+        &self.expr
     }
 }
 
@@ -99,7 +102,6 @@ impl ExecutionPlan for SortExec {
             1 => Ok(Arc::new(SortExec::try_new(
                 self.expr.clone(),
                 children[0].clone(),
-                self.concurrency,
             )?)),
             _ => Err(DataFusionError::Internal(
                 "SortExec wrong number of children".to_string(),
@@ -128,10 +130,13 @@ impl ExecutionPlan for SortExec {
 }
 
 fn sort_batches(
-    batches: &Vec<RecordBatch>,
+    batches: &[RecordBatch],
     schema: &SchemaRef,
     expr: &[PhysicalSortExpr],
-) -> ArrowResult<RecordBatch> {
+) -> ArrowResult<Option<RecordBatch>> {
+    if batches.is_empty() {
+        return Ok(None);
+    }
     // combine all record batches into one for each column
     let combined_batch = RecordBatch::try_new(
         schema.clone(),
@@ -151,16 +156,18 @@ fn sort_batches(
     )?;
 
     // sort combined record batch
+    // TODO: pushup the limit expression to sort
     let indices = lexsort_to_indices(
         &expr
             .iter()
             .map(|e| e.evaluate_to_sort_column(&combined_batch))
             .collect::<Result<Vec<SortColumn>>>()
             .map_err(DataFusionError::into_arrow_external_error)?,
+        None,
     )?;
 
     // reorder all rows based on sorted indices
-    RecordBatch::try_new(
+    let sorted_batch = RecordBatch::try_new(
         schema.clone(),
         combined_batch
             .columns()
@@ -177,13 +184,14 @@ fn sort_batches(
                 )
             })
             .collect::<ArrowResult<Vec<ArrayRef>>>()?,
-    )
+    );
+    sorted_batch.map(Some)
 }
 
 pin_project! {
     struct SortStream {
         #[pin]
-        output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
+        output: futures::channel::oneshot::Receiver<ArrowResult<Option<RecordBatch>>>,
         finished: bool,
         schema: SchemaRef,
     }
@@ -230,10 +238,10 @@ impl Stream for SortStream {
 
                 // check for error in receiving channel and unwrap actual result
                 let result = match result {
-                    Err(e) => Err(ArrowError::ExternalError(Box::new(e))), // error receiving
-                    Ok(result) => result,
+                    Err(e) => Some(Err(ArrowError::ExternalError(Box::new(e)))), // error receiving
+                    Ok(result) => result.transpose(),
                 };
-                Poll::Ready(Some(result))
+                Poll::Ready(result)
             }
             Poll::Pending => Poll::Pending,
         }
@@ -265,8 +273,13 @@ mod tests {
         let schema = test::aggr_test_schema();
         let partitions = 4;
         let path = test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
-        let csv =
-            CsvExec::try_new(&path, CsvReadOptions::new().schema(&schema), None, 1024)?;
+        let csv = CsvExec::try_new(
+            &path,
+            CsvReadOptions::new().schema(&schema),
+            None,
+            1024,
+            None,
+        )?;
 
         let sort_exec = Arc::new(SortExec::try_new(
             vec![
@@ -287,7 +300,6 @@ mod tests {
                 },
             ],
             Arc::new(MergeExec::new(Arc::new(csv))),
-            2,
         )?);
 
         let result: Vec<RecordBatch> = collect(sort_exec).await?;
@@ -361,8 +373,7 @@ mod tests {
                     },
                 },
             ],
-            Arc::new(MemoryExec::try_new(&vec![vec![batch]], schema, None)?),
-            2,
+            Arc::new(MemoryExec::try_new(&[vec![batch]], schema, None)?),
         )?);
 
         assert_eq!(DataType::Float32, *sort_exec.schema().field(0).data_type());

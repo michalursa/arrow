@@ -27,7 +27,7 @@ use super::{equal_range, utils::child_logical_null_buffer};
 /// If an array is a child of a struct or list, the array's nulls have to be merged with the parent.
 /// This then affects the null count of the array, thus the merged nulls are passed separately
 /// as `lhs_nulls` and `rhs_nulls` variables to functions.
-/// The nulls are merged with a bitwise AND, and null counts are recomputed wheer necessary.
+/// The nulls are merged with a bitwise AND, and null counts are recomputed where necessary.
 fn equal_values(
     lhs: &ArrayData,
     rhs: &ArrayData,
@@ -79,8 +79,8 @@ pub(super) fn struct_equal(
             let lhs_pos = lhs_start + i;
             let rhs_pos = rhs_start + i;
             // if both struct and child had no null buffers,
-            let lhs_is_null = !get_bit(lhs_null_bytes, lhs_pos);
-            let rhs_is_null = !get_bit(rhs_null_bytes, rhs_pos);
+            let lhs_is_null = !get_bit(lhs_null_bytes, lhs_pos + lhs.offset());
+            let rhs_is_null = !get_bit(rhs_null_bytes, rhs_pos + rhs.offset());
 
             lhs_is_null
                 || (lhs_is_null == rhs_is_null)

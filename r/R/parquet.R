@@ -27,7 +27,7 @@
 #' @return A [arrow::Table][Table], or a `data.frame` if `as_data_frame` is
 #' `TRUE` (the default).
 #' @examples
-#' \donttest{
+#' \dontrun{
 #' tf <- tempfile()
 #' on.exit(unlink(tf))
 #' write_parquet(mtcars, tf)
@@ -122,7 +122,7 @@ read_parquet <- function(file,
 #' @return the input `x` invisibly.
 #'
 #' @examples
-#' \donttest{
+#' \dontrun{
 #' tf1 <- tempfile(fileext = ".parquet")
 #' write_parquet(data.frame(x = 1:5), tf1)
 #'
@@ -275,6 +275,7 @@ make_valid_version <- function(version, valid_versions = valid_parquet_version) 
 #' "snappy" for the `compression` argument.
 #'
 #' @seealso [write_parquet]
+#' @seealso [Schema] for information about schemas and metadata handling.
 #'
 #' @export
 ParquetWriterProperties <- R6Class("ParquetWriterProperties", inherit = ArrowObject)
@@ -448,7 +449,7 @@ ParquetFileWriter$create <- function(schema,
 #'
 #' @export
 #' @examples
-#' \donttest{
+#' \dontrun{
 #' f <- system.file("v0.7.1.parquet", package="arrow")
 #' pq <- ParquetFileReader$create(f)
 #' pq$GetSchema()

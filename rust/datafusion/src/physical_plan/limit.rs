@@ -44,18 +44,22 @@ pub struct GlobalLimitExec {
     input: Arc<dyn ExecutionPlan>,
     /// Maximum number of rows to return
     limit: usize,
-    /// Number of threads to run parallel LocalLimitExec on
-    concurrency: usize,
 }
 
 impl GlobalLimitExec {
     /// Create a new MergeExec
-    pub fn new(input: Arc<dyn ExecutionPlan>, limit: usize, concurrency: usize) -> Self {
-        GlobalLimitExec {
-            input,
-            limit,
-            concurrency,
-        }
+    pub fn new(input: Arc<dyn ExecutionPlan>, limit: usize) -> Self {
+        GlobalLimitExec { input, limit }
+    }
+
+    /// Input execution plan
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    /// Maximum number of rows to return
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 }
 
@@ -91,7 +95,6 @@ impl ExecutionPlan for GlobalLimitExec {
             1 => Ok(Arc::new(GlobalLimitExec::new(
                 children[0].clone(),
                 self.limit,
-                self.concurrency,
             ))),
             _ => Err(DataFusionError::Internal(
                 "GlobalLimitExec wrong number of children".to_string(),
@@ -123,7 +126,9 @@ impl ExecutionPlan for GlobalLimitExec {
 /// LocalLimitExec applies a limit to a single partition
 #[derive(Debug)]
 pub struct LocalLimitExec {
+    /// Input execution plan
     input: Arc<dyn ExecutionPlan>,
+    /// Maximum number of rows to return
     limit: usize,
 }
 
@@ -131,6 +136,16 @@ impl LocalLimitExec {
     /// Create a new LocalLimitExec partition
     pub fn new(input: Arc<dyn ExecutionPlan>, limit: usize) -> Self {
         Self { input, limit }
+    }
+
+    /// Input execution plan
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    /// Maximum number of rows to return
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 }
 
@@ -252,13 +267,18 @@ mod tests {
         let path =
             test::create_partitioned_csv("aggregate_test_100.csv", num_partitions)?;
 
-        let csv =
-            CsvExec::try_new(&path, CsvReadOptions::new().schema(&schema), None, 1024)?;
+        let csv = CsvExec::try_new(
+            &path,
+            CsvReadOptions::new().schema(&schema),
+            None,
+            1024,
+            None,
+        )?;
 
         // input should have 4 partitions
         assert_eq!(csv.output_partitioning().partition_count(), num_partitions);
 
-        let limit = GlobalLimitExec::new(Arc::new(MergeExec::new(Arc::new(csv))), 7, 2);
+        let limit = GlobalLimitExec::new(Arc::new(MergeExec::new(Arc::new(csv))), 7);
 
         // the result should contain 4 batches (one per input partition)
         let iter = limit.execute(0).await?;

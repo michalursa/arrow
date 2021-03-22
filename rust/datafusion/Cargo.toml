@@ -18,7 +18,7 @@
 [package]
 name = "datafusion"
 description = "DataFusion is an in-memory query engine that uses Apache Arrow as the memory model"
-version = "3.0.0-SNAPSHOT"
+version = "4.0.0-SNAPSHOT"
 homepage = "https://github.com/apache/arrow"
 repository = "https://github.com/apache/arrow"
 authors = ["Apache Arrow <dev@arrow.apache.org>"]
@@ -40,35 +40,45 @@ name = "datafusion-cli"
 path = "src/bin/main.rs"
 
 [features]
-default = ["cli"]
+default = ["cli", "crypto_expressions", "regex_expressions", "unicode_expressions"]
 cli = ["rustyline"]
 simd = ["arrow/simd"]
+crypto_expressions = ["md-5", "sha2"]
+regex_expressions = ["regex", "lazy_static"]
+unicode_expressions = ["unicode-segmentation"]
 
 [dependencies]
-ahash = "0.6"
+ahash = "0.7"
 hashbrown = "0.9"
-arrow = { path = "../arrow", version = "3.0.0-SNAPSHOT", features = ["prettyprint"] }
-parquet = { path = "../parquet", version = "3.0.0-SNAPSHOT", features = ["arrow"] }
-sqlparser = "0.7.0"
+arrow = { path = "../arrow", version = "4.0.0-SNAPSHOT", features = ["prettyprint"] }
+parquet = { path = "../parquet", version = "4.0.0-SNAPSHOT", features = ["arrow"] }
+sqlparser = "0.8.0"
 clap = "2.33"
 rustyline = {version = "7.0", optional = true}
-crossbeam = "0.8"
 paste = "^1.0"
 num_cpus = "1.13.0"
 chrono = "0.4"
 async-trait = "0.1.41"
 futures = "0.3"
 pin-project-lite= "^0.2.0"
-tokio = { version = "0.2", features = ["macros", "blocking", "rt-core", "rt-threaded", "sync"] }
+tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio-stream = "0.1"
 log = "^0.4"
+md-5 = { version = "^0.9.1", optional = true }
+sha2 = { version = "^0.9.1", optional = true }
+ordered-float = "2.0"
+unicode-segmentation = { version = "^1.7.1", optional = true }
+regex = { version = "^1.4.3", optional = true }
+lazy_static = { version = "^1.4.0", optional = true }
 
 [dev-dependencies]
 rand = "0.8"
 criterion = "0.3"
 tempfile = "3"
-prost = "0.6"
-arrow-flight = { path = "../arrow-flight", version = "3.0.0-SNAPSHOT" }
-tonic = "0.3"
+prost = "0.7"
+arrow-flight = { path = "../arrow-flight", version = "4.0.0-SNAPSHOT" }
+tonic = "0.4"
+doc-comment = "0.3"
 
 [[bench]]
 name = "aggregate_query_sql"
@@ -84,4 +94,8 @@ harness = false
 
 [[bench]]
 name = "filter_query_sql"
+harness = false
+
+[[bench]]
+name = "scalar"
 harness = false

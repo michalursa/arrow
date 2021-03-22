@@ -17,13 +17,14 @@
 
 //! Defines kernel to extract a substring of a \[Large\]StringArray
 
-use crate::{array::*, buffer::Buffer, datatypes::ToByteSlice};
+use crate::{array::*, buffer::Buffer};
 use crate::{
     datatypes::DataType,
     error::{ArrowError, Result},
 };
 use std::sync::Arc;
 
+#[allow(clippy::unnecessary_wraps)]
 fn generic_substring<OffsetSize: StringOffsetSizeTrait>(
     array: &GenericStringArray<OffsetSize>,
     start: OffsetSize,
@@ -81,8 +82,8 @@ fn generic_substring<OffsetSize: StringOffsetSizeTrait>(
         null_bit_buffer,
         0,
         vec![
-            Buffer::from(new_offsets.to_byte_slice()),
-            Buffer::from(&new_values[..]),
+            Buffer::from_slice_ref(&new_offsets),
+            Buffer::from_slice_ref(&new_values),
         ],
         vec![],
     );

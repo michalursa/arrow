@@ -24,16 +24,16 @@ use std::sync::Arc;
 use std::vec::Vec;
 
 use arrow::array::{
-    Array, ArrayData, ArrayDataBuilder, ArrayDataRef, ArrayRef, BinaryArray,
-    BinaryBuilder, BooleanArray, BooleanBufferBuilder, DecimalBuilder,
-    FixedSizeBinaryArray, FixedSizeBinaryBuilder, GenericListArray, Int16BufferBuilder,
-    Int32Array, Int64Array, ListBuilder, OffsetSizeTrait, PrimitiveArray,
+    new_empty_array, Array, ArrayData, ArrayDataBuilder, ArrayDataRef, ArrayRef,
+    BinaryArray, BinaryBuilder, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
+    DecimalBuilder, FixedSizeBinaryArray, FixedSizeBinaryBuilder, GenericListArray,
+    Int16BufferBuilder, Int32Array, Int64Array, OffsetSizeTrait, PrimitiveArray,
     PrimitiveBuilder, StringArray, StringBuilder, StructArray,
 };
 use arrow::buffer::{Buffer, MutableBuffer};
 use arrow::datatypes::{
     ArrowPrimitiveType, BooleanType as ArrowBooleanType, DataType as ArrowType,
-    Date32Type as ArrowDate32Type, Date64Type as ArrowDate64Type, DateUnit,
+    Date32Type as ArrowDate32Type, Date64Type as ArrowDate64Type,
     DurationMicrosecondType as ArrowDurationMicrosecondType,
     DurationMillisecondType as ArrowDurationMillisecondType,
     DurationNanosecondType as ArrowDurationNanosecondType,
@@ -64,7 +64,7 @@ use crate::arrow::converter::{
 };
 use crate::arrow::record_reader::RecordReader;
 use crate::arrow::schema::parquet_to_arrow_field;
-use crate::basic::{LogicalType, Repetition, Type as PhysicalType};
+use crate::basic::{ConvertedType, Repetition, Type as PhysicalType};
 use crate::column::page::PageIterator;
 use crate::column::reader::ColumnReaderImpl;
 use crate::data_type::{
@@ -345,9 +345,9 @@ impl<T: DataType> ArrayReader for PrimitiveArrayReader<T> {
         // - date64: we should cast int32 to date32, then date32 to date64.
         let target_type = self.get_data_type();
         let array = match target_type {
-            ArrowType::Date64(_) => {
+            ArrowType::Date64 => {
                 // this is cheap as it internally reinterprets the data
-                let a = arrow::compute::cast(&array, &ArrowType::Date32(DateUnit::Day))?;
+                let a = arrow::compute::cast(&array, &ArrowType::Date32)?;
                 arrow::compute::cast(&a, target_type)?
             }
             ArrowType::Decimal(p, s) => {
@@ -435,15 +435,10 @@ where
     }
 
     fn next_batch(&mut self, batch_size: usize) -> Result<ArrayRef> {
-        // Try to initialized column reader
+        // Try to initialize column reader
         if self.column_reader.is_none() {
-            let init_result = self.next_column_reader()?;
-            if !init_result {
-                return Err(general_err!("No page left!"));
-            }
+            self.next_column_reader()?;
         }
-
-        assert!(self.column_reader.is_some());
 
         let mut data_buffer: Vec<T::T> = Vec::with_capacity(batch_size);
         data_buffer.resize_with(batch_size, T::T::default);
@@ -466,7 +461,7 @@ where
 
         let mut num_read = 0;
 
-        while num_read < batch_size {
+        while self.column_reader.is_some() && num_read < batch_size {
             let num_to_read = batch_size - num_read;
             let cur_data_buf = &mut data_buffer[num_read..];
             let cur_def_levels_buf =
@@ -629,105 +624,6 @@ impl<OffsetSize: OffsetSizeTrait> ListArrayReader<OffsetSize> {
     }
 }
 
-macro_rules! build_empty_list_array_with_primitive_items {
-    ($item_type:ident) => {{
-        let values_builder = PrimitiveBuilder::<$item_type>::new(0);
-        let mut builder = ListBuilder::new(values_builder);
-        let empty_list_array = builder.finish();
-        Ok(Arc::new(empty_list_array))
-    }};
-}
-
-macro_rules! build_empty_list_array_with_non_primitive_items {
-    ($builder:ident) => {{
-        let values_builder = $builder::new(0);
-        let mut builder = ListBuilder::new(values_builder);
-        let empty_list_array = builder.finish();
-        Ok(Arc::new(empty_list_array))
-    }};
-}
-
-fn build_empty_list_array(item_type: ArrowType) -> Result<ArrayRef> {
-    match item_type {
-        ArrowType::UInt8 => build_empty_list_array_with_primitive_items!(ArrowUInt8Type),
-        ArrowType::UInt16 => {
-            build_empty_list_array_with_primitive_items!(ArrowUInt16Type)
-        }
-        ArrowType::UInt32 => {
-            build_empty_list_array_with_primitive_items!(ArrowUInt32Type)
-        }
-        ArrowType::UInt64 => {
-            build_empty_list_array_with_primitive_items!(ArrowUInt64Type)
-        }
-        ArrowType::Int8 => build_empty_list_array_with_primitive_items!(ArrowInt8Type),
-        ArrowType::Int16 => build_empty_list_array_with_primitive_items!(ArrowInt16Type),
-        ArrowType::Int32 => build_empty_list_array_with_primitive_items!(ArrowInt32Type),
-        ArrowType::Int64 => build_empty_list_array_with_primitive_items!(ArrowInt64Type),
-        ArrowType::Float32 => {
-            build_empty_list_array_with_primitive_items!(ArrowFloat32Type)
-        }
-        ArrowType::Float64 => {
-            build_empty_list_array_with_primitive_items!(ArrowFloat64Type)
-        }
-        ArrowType::Boolean => {
-            //build_empty_list_array_with_primitive_items!(ArrowBooleanType)
-            todo!()
-        }
-        ArrowType::Date32(_) => {
-            build_empty_list_array_with_primitive_items!(ArrowDate32Type)
-        }
-        ArrowType::Date64(_) => {
-            build_empty_list_array_with_primitive_items!(ArrowDate64Type)
-        }
-        ArrowType::Time32(ArrowTimeUnit::Second) => {
-            build_empty_list_array_with_primitive_items!(ArrowTime32SecondType)
-        }
-        ArrowType::Time32(ArrowTimeUnit::Millisecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowTime32MillisecondType)
-        }
-        ArrowType::Time64(ArrowTimeUnit::Microsecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowTime64MicrosecondType)
-        }
-        ArrowType::Time64(ArrowTimeUnit::Nanosecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowTime64NanosecondType)
-        }
-        ArrowType::Duration(ArrowTimeUnit::Second) => {
-            build_empty_list_array_with_primitive_items!(ArrowDurationSecondType)
-        }
-        ArrowType::Duration(ArrowTimeUnit::Millisecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowDurationMillisecondType)
-        }
-        ArrowType::Duration(ArrowTimeUnit::Microsecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowDurationMicrosecondType)
-        }
-        ArrowType::Duration(ArrowTimeUnit::Nanosecond) => {
-            build_empty_list_array_with_primitive_items!(ArrowDurationNanosecondType)
-        }
-        ArrowType::Timestamp(ArrowTimeUnit::Second, _) => {
-            build_empty_list_array_with_primitive_items!(ArrowTimestampSecondType)
-        }
-        ArrowType::Timestamp(ArrowTimeUnit::Millisecond, _) => {
-            build_empty_list_array_with_primitive_items!(ArrowTimestampMillisecondType)
-        }
-        ArrowType::Timestamp(ArrowTimeUnit::Microsecond, _) => {
-            build_empty_list_array_with_primitive_items!(ArrowTimestampMicrosecondType)
-        }
-        ArrowType::Timestamp(ArrowTimeUnit::Nanosecond, _) => {
-            build_empty_list_array_with_primitive_items!(ArrowTimestampNanosecondType)
-        }
-        ArrowType::Utf8 => {
-            build_empty_list_array_with_non_primitive_items!(StringBuilder)
-        }
-        ArrowType::Binary => {
-            build_empty_list_array_with_non_primitive_items!(BinaryBuilder)
-        }
-        _ => Err(ParquetError::General(format!(
-            "ListArray of type List({:?}) is not supported by array_reader",
-            item_type
-        ))),
-    }
-}
-
 macro_rules! remove_primitive_array_indices {
     ($arr: expr, $item_type:ty, $indices:expr) => {{
         let array_data = match $arr.as_any().downcast_ref::<PrimitiveArray<$item_type>>() {
@@ -816,13 +712,17 @@ fn remove_indices(
             remove_primitive_array_indices!(arr, ArrowFloat64Type, indices)
         }
         ArrowType::Boolean => {
-            todo!()
-            //remove_primitive_array_indices!(arr, ArrowBooleanType, indices)
+            remove_array_indices_custom_builder!(
+                arr,
+                BooleanArray,
+                BooleanBuilder,
+                indices
+            )
         }
-        ArrowType::Date32(_) => {
+        ArrowType::Date32 => {
             remove_primitive_array_indices!(arr, ArrowDate32Type, indices)
         }
-        ArrowType::Date64(_) => {
+        ArrowType::Date64 => {
             remove_primitive_array_indices!(arr, ArrowDate64Type, indices)
         }
         ArrowType::Time32(ArrowTimeUnit::Second) => {
@@ -898,7 +798,7 @@ impl<OffsetSize: OffsetSizeTrait> ArrayReader for ListArrayReader<OffsetSize> {
         let item_type = self.item_reader.get_data_type().clone();
 
         if next_batch_array.len() == 0 {
-            return build_empty_list_array(item_type);
+            return Ok(new_empty_array(&self.data_type));
         }
         let def_levels = self
             .item_reader
@@ -917,11 +817,36 @@ impl<OffsetSize: OffsetSizeTrait> ArrayReader for ListArrayReader<OffsetSize> {
             ));
         }
 
-        // Need to remove from the values array the nulls that represent null lists rather than null items
-        // null lists have def_level = 0
+        // List definitions can be encoded as 4 values:
+        // - n + 0: the list slot is null
+        // - n + 1: the list slot is not null, but is empty (i.e. [])
+        // - n + 2: the list slot is not null, but its child is empty (i.e. [ null ])
+        // - n + 3: the list slot is not null, and its child is not empty
+        // Where n is the max definition level of the list's parent.
+        // If a Parquet schema's only leaf is the list, then n = 0.
+
+        // TODO: ARROW-10391 - add a test case with a non-nullable child, check if max is 3
+        let list_field_type = match self.get_data_type() {
+            ArrowType::List(field)
+            | ArrowType::FixedSizeList(field, _)
+            | ArrowType::LargeList(field) => field,
+            _ => {
+                // Panic: this is safe as we only write lists from list datatypes
+                unreachable!()
+            }
+        };
+        let max_list_def_range = if list_field_type.is_nullable() { 3 } else { 2 };
+        let max_list_definition = *(def_levels.iter().max().unwrap());
+        // TODO: ARROW-10391 - Find a reliable way of validating deeply-nested lists
+        // debug_assert!(
+        //     max_list_definition >= max_list_def_range,
+        //     "Lift definition max less than range"
+        // );
+        let list_null_def = max_list_definition - max_list_def_range;
+        let list_empty_def = max_list_definition - 1;
         let mut null_list_indices: Vec<usize> = Vec::new();
         for i in 0..def_levels.len() {
-            if def_levels[i] == 0 {
+            if def_levels[i] == list_null_def {
                 null_list_indices.push(i);
             }
         }
@@ -942,7 +867,7 @@ impl<OffsetSize: OffsetSizeTrait> ArrayReader for ListArrayReader<OffsetSize> {
             if rep_levels[i] == 0 {
                 offsets.push(cur_offset)
             }
-            if def_levels[i] > 0 {
+            if def_levels[i] >= list_empty_def {
                 cur_offset += OffsetSize::one();
             }
         }
@@ -1079,7 +1004,7 @@ impl ArrayReader for StructArrayReader {
         // calculate struct def level data
         let buffer_size = children_array_len * size_of::<i16>();
         let mut def_level_data_buffer = MutableBuffer::new(buffer_size);
-        def_level_data_buffer.resize(buffer_size);
+        def_level_data_buffer.resize(buffer_size, 0);
 
         let def_level_data = def_level_data_buffer.typed_data_mut();
 
@@ -1170,6 +1095,7 @@ where
 
     for c in column_indices {
         let column = parquet_schema.column(c).self_type() as *const Type;
+
         leaves.insert(column, c);
 
         let root = parquet_schema.get_column_root_ptr(c);
@@ -1470,12 +1396,11 @@ impl<'a> ArrayReaderBuilder {
             self.file_reader.clone(),
         )?);
 
-        let arrow_type = self
-            .arrow_schema
-            .field_with_name(cur_type.name())
-            .ok()
-            .map(|f| f.data_type())
-            .cloned();
+        let arrow_type: Option<ArrowType> = match self.get_arrow_field(&cur_type, context)
+        {
+            Some(f) => Some(f.data_type().clone()),
+            _ => None,
+        };
 
         match cur_type.get_physical_type() {
             PhysicalType::BOOLEAN => Ok(Box::new(PrimitiveArrayReader::<BoolType>::new(
@@ -1503,7 +1428,18 @@ impl<'a> ArrayReaderBuilder {
                 arrow_type,
             )?)),
             PhysicalType::INT96 => {
-                let converter = Int96Converter::new(Int96ArrayConverter {});
+                // get the optional timezone information from arrow type
+                let timezone = arrow_type
+                    .as_ref()
+                    .map(|data_type| {
+                        if let ArrowType::Timestamp(_, tz) = data_type {
+                            tz.clone()
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten();
+                let converter = Int96Converter::new(Int96ArrayConverter { timezone });
                 Ok(Box::new(ComplexObjectArrayReader::<
                     Int96Type,
                     Int96Converter,
@@ -1527,7 +1463,7 @@ impl<'a> ArrayReaderBuilder {
                 )?))
             }
             PhysicalType::BYTE_ARRAY => {
-                if cur_type.get_basic_info().logical_type() == LogicalType::UTF8 {
+                if cur_type.get_basic_info().converted_type() == ConvertedType::UTF8 {
                     if let Some(ArrowType::LargeUtf8) = arrow_type {
                         let converter =
                             LargeUtf8Converter::new(LargeUtf8ArrayConverter {});
@@ -1578,7 +1514,8 @@ impl<'a> ArrayReaderBuilder {
                 }
             }
             PhysicalType::FIXED_LEN_BYTE_ARRAY
-                if cur_type.get_basic_info().logical_type() == LogicalType::DECIMAL =>
+                if cur_type.get_basic_info().converted_type()
+                    == ConvertedType::DECIMAL =>
             {
                 let converter = DecimalConverter::new(DecimalArrayConverter::new(
                     cur_type.get_precision(),
@@ -1595,7 +1532,7 @@ impl<'a> ArrayReaderBuilder {
                 )?))
             }
             PhysicalType::FIXED_LEN_BYTE_ARRAY => {
-                if cur_type.get_basic_info().logical_type() == LogicalType::INTERVAL {
+                if cur_type.get_basic_info().converted_type() == ConvertedType::INTERVAL {
                     let byte_width = match *cur_type {
                         Type::PrimitiveType {
                             ref type_length, ..
@@ -1695,9 +1632,13 @@ impl<'a> ArrayReaderBuilder {
         let mut children_reader = Vec::with_capacity(cur_type.get_fields().len());
 
         for child in cur_type.get_fields() {
+            let mut struct_context = context.clone();
             if let Some(child_reader) = self.dispatch(child.clone(), context)? {
-                let field = match self.arrow_schema.field_with_name(child.name()) {
-                    Ok(f) => f.to_owned(),
+                // TODO: this results in calling get_arrow_field twice, it could be reused
+                // from child_reader above, by making child_reader carry its `Field`
+                struct_context.path.append(vec![child.name().to_string()]);
+                let field = match self.get_arrow_field(child, &struct_context) {
+                    Some(f) => f.clone(),
                     _ => Field::new(
                         child.name(),
                         child_reader.get_data_type().clone(),
@@ -1719,6 +1660,45 @@ impl<'a> ArrayReaderBuilder {
             ))))
         } else {
             Ok(None)
+        }
+    }
+
+    fn get_arrow_field(
+        &self,
+        cur_type: &Type,
+        context: &'a ArrayReaderBuilderContext,
+    ) -> Option<&Field> {
+        let parts: Vec<&str> = context
+            .path
+            .parts()
+            .iter()
+            .map(|x| -> &str { x })
+            .collect::<Vec<&str>>();
+
+        // If the parts length is one it'll have the top level "schema" type. If
+        // it's two then it'll be a top-level type that we can get from the arrow
+        // schema directly.
+        if parts.len() <= 2 {
+            self.arrow_schema.field_with_name(cur_type.name()).ok()
+        } else {
+            // If it's greater than two then we need to traverse the type path
+            // until we find the actual field we're looking for.
+            let mut field: Option<&Field> = None;
+
+            for (i, part) in parts.iter().enumerate().skip(1) {
+                if i == 1 {
+                    field = self.arrow_schema.field_with_name(part).ok();
+                } else if let Some(f) = field {
+                    if let ArrowType::Struct(fields) = f.data_type() {
+                        field = fields.iter().find(|f| f.name() == part)
+                    } else {
+                        field = None
+                    }
+                } else {
+                    field = None
+                }
+            }
+            field
         }
     }
 }
@@ -1909,14 +1889,14 @@ mod tests {
     }
 
     macro_rules! test_primitive_array_reader_one_type {
-        ($arrow_parquet_type:ty, $physical_type:expr, $logical_type_str:expr, $result_arrow_type:ty, $result_arrow_cast_type:ty, $result_primitive_type:ty) => {{
+        ($arrow_parquet_type:ty, $physical_type:expr, $converted_type_str:expr, $result_arrow_type:ty, $result_arrow_cast_type:ty, $result_primitive_type:ty) => {{
             let message_type = format!(
                 "
             message test_schema {{
               REQUIRED {:?} leaf ({});
           }}
             ",
-                $physical_type, $logical_type_str
+                $physical_type, $converted_type_str
             );
             let schema = parse_message_type(&message_type)
                 .map(|t| Arc::new(SchemaDescriptor::new(Arc::new(t))))
@@ -2125,6 +2105,37 @@ mod tests {
                 array_reader.get_rep_levels()
             );
         }
+    }
+
+    #[test]
+    fn test_complex_array_reader_no_pages() {
+        let message_type = "
+        message test_schema {
+            REPEATED Group test_mid {
+                OPTIONAL BYTE_ARRAY leaf (UTF8);
+            }
+        }
+        ";
+        let schema = parse_message_type(message_type)
+            .map(|t| Arc::new(SchemaDescriptor::new(Arc::new(t))))
+            .unwrap();
+        let column_desc = schema.column(0);
+        let pages: Vec<Vec<Page>> = Vec::new();
+        let page_iterator = InMemoryPageIterator::new(schema, column_desc.clone(), pages);
+
+        let converter = Utf8Converter::new(Utf8ArrayConverter {});
+        let mut array_reader =
+            ComplexObjectArrayReader::<ByteArrayType, Utf8Converter>::new(
+                Box::new(page_iterator),
+                column_desc,
+                converter,
+                None,
+            )
+            .unwrap();
+
+        let values_per_page = 100; // this value is arbitrary in this test - the result should always be an array of 0 length
+        let array = array_reader.next_batch(values_per_page).unwrap();
+        assert_eq!(array.len(), 0);
     }
 
     #[test]

@@ -28,49 +28,21 @@ use std::sync::Arc;
 use num::{One, Zero};
 
 use crate::buffer::Buffer;
-#[cfg(feature = "simd")]
+#[cfg(simd)]
 use crate::buffer::MutableBuffer;
-use crate::compute::util::combine_option_bitmap;
+use crate::compute::{kernels::arity::unary, util::combine_option_bitmap};
 use crate::datatypes;
-use crate::datatypes::{ArrowNumericType, ToByteSlice};
+use crate::datatypes::ArrowNumericType;
 use crate::error::{ArrowError, Result};
 use crate::{array::*, util::bit_util};
-#[cfg(simd_x86)]
+use num::traits::Pow;
+#[cfg(simd)]
 use std::borrow::BorrowMut;
-#[cfg(simd_x86)]
+#[cfg(simd)]
 use std::slice::{ChunksExact, ChunksExactMut};
 
-/// Helper function to perform math lambda function on values from single array of signed numeric
-/// type. If value is null then the output value is also null, so `-null` is `null`.
-pub fn signed_unary_math_op<T, F>(
-    array: &PrimitiveArray<T>,
-    op: F,
-) -> Result<PrimitiveArray<T>>
-where
-    T: datatypes::ArrowSignedNumericType,
-    T::Native: Neg<Output = T::Native>,
-    F: Fn(T::Native) -> T::Native,
-{
-    let values = array
-        .values()
-        .iter()
-        .map(|v| op(*v))
-        .collect::<Vec<T::Native>>();
-
-    let data = ArrayData::new(
-        T::DATA_TYPE,
-        array.len(),
-        None,
-        array.data_ref().null_buffer().cloned(),
-        0,
-        vec![Buffer::from(values.to_byte_slice())],
-        vec![],
-    );
-    Ok(PrimitiveArray::<T>::from(Arc::new(data)))
-}
-
-/// SIMD vectorized version of `signed_unary_math_op` above.
-#[cfg(simd_x86)]
+/// SIMD vectorized version of `unary_math_op` above specialized for signed numerical values.
+#[cfg(simd)]
 fn simd_signed_unary_math_op<T, SIMD_OP, SCALAR_OP>(
     array: &PrimitiveArray<T>,
     simd_op: SIMD_OP,
@@ -95,6 +67,55 @@ where
             let simd_input = T::load_signed(input_slice);
             let simd_result = T::signed_unary_op(simd_input, &simd_op);
             T::write_signed(simd_result, result_slice);
+        });
+
+    let result_remainder = result_chunks.into_remainder();
+    let array_remainder = array_chunks.remainder();
+
+    result_remainder.into_iter().zip(array_remainder).for_each(
+        |(scalar_result, scalar_input)| {
+            *scalar_result = scalar_op(*scalar_input);
+        },
+    );
+
+    let data = ArrayData::new(
+        T::DATA_TYPE,
+        array.len(),
+        None,
+        array.data_ref().null_buffer().cloned(),
+        0,
+        vec![result.into()],
+        vec![],
+    );
+    Ok(PrimitiveArray::<T>::from(Arc::new(data)))
+}
+
+#[cfg(simd)]
+fn simd_float_unary_math_op<T, SIMD_OP, SCALAR_OP>(
+    array: &PrimitiveArray<T>,
+    simd_op: SIMD_OP,
+    scalar_op: SCALAR_OP,
+) -> Result<PrimitiveArray<T>>
+where
+    T: datatypes::ArrowFloatNumericType,
+    SIMD_OP: Fn(T::Simd) -> T::Simd,
+    SCALAR_OP: Fn(T::Native) -> T::Native,
+{
+    let lanes = T::lanes();
+    let buffer_size = array.len() * std::mem::size_of::<T::Native>();
+
+    let mut result = MutableBuffer::new(buffer_size).with_bitset(buffer_size, false);
+
+    let mut result_chunks = result.typed_data_mut().chunks_exact_mut(lanes);
+    let mut array_chunks = array.values().chunks_exact(lanes);
+
+    result_chunks
+        .borrow_mut()
+        .zip(array_chunks.borrow_mut())
+        .for_each(|(result_slice, input_slice)| {
+            let simd_input = T::load(input_slice);
+            let simd_result = T::unary_op(simd_input, &simd_op);
+            T::write(simd_result, result_slice);
         });
 
     let result_remainder = result_chunks.into_remainder();
@@ -147,8 +168,13 @@ where
         .values()
         .iter()
         .zip(right.values().iter())
-        .map(|(l, r)| op(*l, *r))
-        .collect::<Vec<T::Native>>();
+        .map(|(l, r)| op(*l, *r));
+    // JUSTIFICATION
+    //  Benefit
+    //      ~60% speedup
+    //  Soundness
+    //      `values` is an iterator with a known size.
+    let buffer = unsafe { Buffer::from_trusted_len_iter(values) };
 
     let data = ArrayData::new(
         T::DATA_TYPE,
@@ -156,7 +182,7 @@ where
         None,
         null_bit_buffer,
         0,
-        vec![Buffer::from(values.to_byte_slice())],
+        vec![buffer],
         vec![],
     );
     Ok(PrimitiveArray::<T>::from(Arc::new(data)))
@@ -186,33 +212,37 @@ where
     let null_bit_buffer =
         combine_option_bitmap(left.data_ref(), right.data_ref(), left.len())?;
 
-    let mut values = Vec::with_capacity(left.len());
-    if let Some(b) = &null_bit_buffer {
-        // some value is null
-        for i in 0..left.len() {
-            let is_valid = unsafe { bit_util::get_bit_raw(b.as_ptr(), i) };
-            values.push(if is_valid {
-                let right_value = right.value(i);
-                if right_value.is_zero() {
-                    return Err(ArrowError::DivideByZero);
+    let buffer = if let Some(b) = &null_bit_buffer {
+        let values = left.values().iter().zip(right.values()).enumerate().map(
+            |(i, (left, right))| {
+                let is_valid = unsafe { bit_util::get_bit_raw(b.as_ptr(), i) };
+                if is_valid {
+                    if right.is_zero() {
+                        Err(ArrowError::DivideByZero)
+                    } else {
+                        Ok(*left / *right)
+                    }
                 } else {
-                    left.value(i) / right_value
+                    Ok(T::default_value())
                 }
-            } else {
-                T::default_value()
-            });
-        }
+            },
+        );
+        unsafe { Buffer::try_from_trusted_len_iter(values) }
     } else {
         // no value is null
-        for i in 0..left.len() {
-            let right_value = right.value(i);
-            values.push(if right_value.is_zero() {
-                return Err(ArrowError::DivideByZero);
-            } else {
-                left.value(i) / right_value
+        let values = left
+            .values()
+            .iter()
+            .zip(right.values())
+            .map(|(left, right)| {
+                if right.is_zero() {
+                    Err(ArrowError::DivideByZero)
+                } else {
+                    Ok(*left / *right)
+                }
             });
-        }
-    };
+        unsafe { Buffer::try_from_trusted_len_iter(values) }
+    }?;
 
     let data = ArrayData::new(
         T::DATA_TYPE,
@@ -220,14 +250,42 @@ where
         None,
         null_bit_buffer,
         0,
-        vec![Buffer::from(values.to_byte_slice())],
+        vec![buffer],
+        vec![],
+    );
+    Ok(PrimitiveArray::<T>::from(Arc::new(data)))
+}
+
+/// Scalar-divisor version of `math_divide`.
+fn math_divide_scalar<T>(
+    array: &PrimitiveArray<T>,
+    divisor: T::Native,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: Div<Output = T::Native> + Zero,
+{
+    if divisor.is_zero() {
+        return Err(ArrowError::DivideByZero);
+    }
+
+    let values = array.values().iter().map(|value| *value / divisor);
+    let buffer = unsafe { Buffer::from_trusted_len_iter(values) };
+
+    let data = ArrayData::new(
+        T::DATA_TYPE,
+        array.len(),
+        None,
+        array.data_ref().null_buffer().cloned(),
+        0,
+        vec![buffer],
         vec![],
     );
     Ok(PrimitiveArray::<T>::from(Arc::new(data)))
 }
 
 /// SIMD vectorized version of `math_op` above.
-#[cfg(simd_x86)]
+#[cfg(simd)]
 fn simd_math_op<T, SIMD_OP, SCALAR_OP>(
     left: &PrimitiveArray<T>,
     right: &PrimitiveArray<T>,
@@ -292,7 +350,7 @@ where
 /// SIMD vectorized implementation of `left / right`.
 /// If any of the lanes marked as valid in `valid_mask` are `0` then an `ArrowError::DivideByZero`
 /// is returned. The contents of no-valid lanes are undefined.
-#[cfg(simd_x86)]
+#[cfg(simd)]
 #[inline]
 fn simd_checked_divide<T: ArrowNumericType>(
     valid_mask: Option<u64>,
@@ -325,7 +383,7 @@ where
 
 /// Scalar implementation of `left / right` for the remainder elements after complete chunks have been processed using SIMD.
 /// If any of the values marked as valid in `valid_mask` are `0` then an `ArrowError::DivideByZero` is returned.
-#[cfg(simd_x86)]
+#[cfg(simd)]
 #[inline]
 fn simd_checked_divide_remainder<T: ArrowNumericType>(
     valid_mask: Option<u64>,
@@ -357,10 +415,39 @@ where
     Ok(())
 }
 
-/// SIMD vectorized version of `divide`, the divide kernel needs it's own implementation as there
-/// is a need to handle situations where a divide by `0` occurs.  This is complicated by `NULL`
-/// slots and padding.
-#[cfg(simd_x86)]
+/// Scalar-divisor version of `simd_checked_divide_remainder`.
+#[cfg(simd)]
+#[inline]
+fn simd_checked_divide_scalar_remainder<T: ArrowNumericType>(
+    array_chunks: ChunksExact<T::Native>,
+    divisor: T::Native,
+    result_chunks: ChunksExactMut<T::Native>,
+) -> Result<()>
+where
+    T::Native: Zero + Div<Output = T::Native>,
+{
+    if divisor.is_zero() {
+        return Err(ArrowError::DivideByZero);
+    }
+
+    let result_remainder = result_chunks.into_remainder();
+    let array_remainder = array_chunks.remainder();
+
+    result_remainder
+        .iter_mut()
+        .zip(array_remainder.iter())
+        .for_each(|(result_scalar, array_scalar)| {
+            *result_scalar = *array_scalar / divisor;
+        });
+
+    Ok(())
+}
+
+/// SIMD vectorized version of `divide`.
+///
+/// The divide kernels need their own implementation as there is a need to handle situations
+/// where a divide by `0` occurs.  This is complicated by `NULL` slots and padding.
+#[cfg(simd)]
 fn simd_divide<T>(
     left: &PrimitiveArray<T>,
     right: &PrimitiveArray<T>,
@@ -476,6 +563,52 @@ where
     Ok(PrimitiveArray::<T>::from(Arc::new(data)))
 }
 
+/// SIMD vectorized version of `divide_scalar`.
+#[cfg(simd)]
+fn simd_divide_scalar<T>(
+    array: &PrimitiveArray<T>,
+    divisor: T::Native,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: One + Zero + Div<Output = T::Native>,
+{
+    if divisor.is_zero() {
+        return Err(ArrowError::DivideByZero);
+    }
+
+    let lanes = T::lanes();
+    let buffer_size = array.len() * std::mem::size_of::<T::Native>();
+    let mut result = MutableBuffer::new(buffer_size).with_bitset(buffer_size, false);
+
+    let mut result_chunks = result.typed_data_mut().chunks_exact_mut(lanes);
+    let mut array_chunks = array.values().chunks_exact(lanes);
+
+    result_chunks
+        .borrow_mut()
+        .zip(array_chunks.borrow_mut())
+        .for_each(|(result_slice, array_slice)| {
+            let simd_left = T::load(array_slice);
+            let simd_right = T::init(divisor);
+
+            let simd_result = T::bin_op(simd_left, simd_right, |a, b| a / b);
+            T::write(simd_result, result_slice);
+        });
+
+    simd_checked_divide_scalar_remainder::<T>(array_chunks, divisor, result_chunks)?;
+
+    let data = ArrayData::new(
+        T::DATA_TYPE,
+        array.len(),
+        None,
+        array.data_ref().null_buffer().cloned(),
+        0,
+        vec![result.into()],
+        vec![],
+    );
+    Ok(PrimitiveArray::<T>::from(Arc::new(data)))
+}
+
 /// Perform `left + right` operation on two arrays. If either left or right value is null
 /// then the result is also null.
 pub fn add<T>(
@@ -490,9 +623,9 @@ where
         + Div<Output = T::Native>
         + Zero,
 {
-    #[cfg(simd_x86)]
+    #[cfg(simd)]
     return simd_math_op(&left, &right, |a, b| a + b, |a, b| a + b);
-    #[cfg(not(simd_x86))]
+    #[cfg(not(simd))]
     return math_op(left, right, |a, b| a + b);
 }
 
@@ -510,9 +643,9 @@ where
         + Div<Output = T::Native>
         + Zero,
 {
-    #[cfg(simd_x86)]
+    #[cfg(simd)]
     return simd_math_op(&left, &right, |a, b| a - b, |a, b| a - b);
-    #[cfg(not(simd_x86))]
+    #[cfg(not(simd))]
     return math_op(left, right, |a, b| a - b);
 }
 
@@ -522,10 +655,32 @@ where
     T: datatypes::ArrowSignedNumericType,
     T::Native: Neg<Output = T::Native>,
 {
-    #[cfg(simd_x86)]
+    #[cfg(simd)]
     return simd_signed_unary_math_op(array, |x| -x, |x| -x);
-    #[cfg(not(simd_x86))]
-    return signed_unary_math_op(array, |x| -x);
+    #[cfg(not(simd))]
+    return Ok(unary(array, |x| -x));
+}
+
+/// Raise array with floating point values to the power of a scalar.
+pub fn powf_scalar<T>(
+    array: &PrimitiveArray<T>,
+    raise: T::Native,
+) -> Result<PrimitiveArray<T>>
+where
+    T: datatypes::ArrowFloatNumericType,
+    T::Native: Pow<T::Native, Output = T::Native>,
+{
+    #[cfg(simd)]
+    {
+        let raise_vector = T::init(raise);
+        return simd_float_unary_math_op(
+            array,
+            |x| T::pow(x, raise_vector),
+            |x| x.pow(raise),
+        );
+    }
+    #[cfg(not(simd))]
+    return Ok(unary(array, |x| x.pow(raise)));
 }
 
 /// Perform `left * right` operation on two arrays. If either left or right value is null
@@ -542,9 +697,9 @@ where
         + Div<Output = T::Native>
         + Zero,
 {
-    #[cfg(simd_x86)]
+    #[cfg(simd)]
     return simd_math_op(&left, &right, |a, b| a * b, |a, b| a * b);
-    #[cfg(not(simd_x86))]
+    #[cfg(not(simd))]
     return math_op(left, right, |a, b| a * b);
 }
 
@@ -564,10 +719,32 @@ where
         + Zero
         + One,
 {
-    #[cfg(simd_x86)]
+    #[cfg(simd)]
     return simd_divide(&left, &right);
-    #[cfg(not(simd_x86))]
+    #[cfg(not(simd))]
     return math_divide(&left, &right);
+}
+
+/// Divide every value in an array by a scalar. If any value in the array is null then the
+/// result is also null. If the scalar is zero then the result of this operation will be
+/// `Err(ArrowError::DivideByZero)`.
+pub fn divide_scalar<T>(
+    array: &PrimitiveArray<T>,
+    divisor: T::Native,
+) -> Result<PrimitiveArray<T>>
+where
+    T: datatypes::ArrowNumericType,
+    T::Native: Add<Output = T::Native>
+        + Sub<Output = T::Native>
+        + Mul<Output = T::Native>
+        + Div<Output = T::Native>
+        + Zero
+        + One,
+{
+    #[cfg(simd)]
+    return simd_divide_scalar(&array, divisor);
+    #[cfg(not(simd))]
+    return math_divide_scalar(&array, divisor);
 }
 
 #[cfg(test)]
@@ -658,6 +835,15 @@ mod tests {
     }
 
     #[test]
+    fn test_primitive_array_divide_scalar() {
+        let a = Int32Array::from(vec![15, 14, 9, 8, 1]);
+        let b = 3;
+        let c = divide_scalar(&a, b).unwrap();
+        let expected = Int32Array::from(vec![5, 4, 3, 2, 0]);
+        assert_eq!(c, expected);
+    }
+
+    #[test]
     fn test_primitive_array_divide_sliced() {
         let a = Int32Array::from(vec![0, 0, 0, 15, 15, 8, 1, 9, 0]);
         let b = Int32Array::from(vec![0, 0, 0, 5, 6, 8, 9, 1, 0]);
@@ -686,6 +872,16 @@ mod tests {
         assert_eq!(0, c.value(3));
         assert_eq!(true, c.is_null(4));
         assert_eq!(true, c.is_null(5));
+    }
+
+    #[test]
+    fn test_primitive_array_divide_scalar_with_nulls() {
+        let a = Int32Array::from(vec![Some(15), None, Some(8), Some(1), Some(9), None]);
+        let b = 3;
+        let c = divide_scalar(&a, b).unwrap();
+        let expected =
+            Int32Array::from(vec![Some(5), None, Some(2), Some(0), Some(3), None]);
+        assert_eq!(c, expected);
     }
 
     #[test]
@@ -795,6 +991,18 @@ mod tests {
             .into_iter()
             .map(|i| Some(i + i))
             .collect();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_primitive_array_raise_power_scalar() {
+        let a = Float64Array::from(vec![1.0, 2.0, 3.0]);
+        let actual = powf_scalar(&a, 2.0).unwrap();
+        let expected = Float64Array::from(vec![1.0, 4.0, 9.0]);
+        assert_eq!(expected, actual);
+        let a = Float64Array::from(vec![Some(1.0), None, Some(3.0)]);
+        let actual = powf_scalar(&a, 2.0).unwrap();
+        let expected = Float64Array::from(vec![Some(1.0), None, Some(9.0)]);
         assert_eq!(expected, actual);
     }
 }

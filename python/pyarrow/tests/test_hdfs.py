@@ -48,7 +48,7 @@ def hdfs_test_client():
         raise ValueError('Env variable ARROW_HDFS_TEST_PORT was not '
                          'an integer')
 
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         return pa.hdfs.connect(host, port, user)
 
 
@@ -323,8 +323,7 @@ class HdfsTestCases:
 
         expected = self._write_multiple_hdfs_pq_files(tmpdir)
         path = _get_hdfs_uri(tmpdir)
-        # TODO for URI it should not be needed to pass this argument
-        result = pq.read_table(path, use_legacy_dataset=True)
+        result = pq.read_table(path)
 
         _pandas_api.assert_frame_equal(result.to_pandas()
                                        .sort_values(by='index')

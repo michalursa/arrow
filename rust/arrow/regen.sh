@@ -21,13 +21,11 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 # Change to the toplevel Rust directory
 pushd $DIR/../../
 
-# As of 2020-12-06, the snapshot flatc version is not changed since "1.12.0",
-# so let's build flatc from source.
-
 echo "Build flatc from source ..."
 
 FB_URL="https://github.com/google/flatbuffers"
-FB_COMMIT="05192553f434d10c5f585aeb6a07a55a6ac702a5"
+# https://github.com/google/flatbuffers/pull/6393
+FB_COMMIT="408cf5802415e1dea65fef7489a6c2f3740fb381"
 FB_DIR="rust/arrow/.flatbuffers"
 FLATC="$FB_DIR/bazel-bin/flatc"
 
@@ -54,8 +52,16 @@ echo "run: bazel build :flatc ..."
 bazel build :flatc
 popd
 
+FB_PATCH="rust/arrow/format-0ed34c83.patch"
+echo "Patch flatbuffer files with ${FB_PATCH} for cargo doc"
+echo "NOTE: the patch MAY need update in case of changes in format/*.fbs"
+git apply --check ${FB_PATCH} && git apply ${FB_PATCH}
+
 # Execute the code generation:
 $FLATC --filename-suffix "" --rust -o rust/arrow/src/ipc/gen/ format/*.fbs
+
+# Reset changes to format/
+git checkout -- format
 
 # Now the files are wrongly named so we have to change that.
 popd
@@ -97,7 +103,6 @@ names=("File" "Message" "Schema" "SparseTensor" "Tensor")
 
 # Remove all generated lines we don't need
 for f in `ls *.rs`; do
-
     if [[ $f == "mod.rs" ]]; then
         continue
     fi
@@ -147,17 +152,6 @@ done
 popd
 cargo +stable fmt -- src/ipc/gen/*
 
-echo "=== TIPS ==="
-echo "Let's manually fix rustdoc of SparseTensorIndexCSF::indptrType:"
-echo 'prepend the tree with ```text, and append the tree with ```'
-cat <<TREE_EOF
-    /// \`\`\`text
-    ///         0          1
-    ///        / \         |
-    ///       0   1        1
-    ///      /   / \       |
-    ///     0   0   1      1
-    ///    /|  /|   |    /| |
-    ///   1 2 0 2   0   0 1 2
-    /// \`\`\`
-TREE_EOF
+echo "DONE!"
+echo "Please run 'cargo doc' and 'cargo test' with nightly and stable, "
+echo "and fix possible errors or warnings!"

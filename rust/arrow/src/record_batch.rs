@@ -93,6 +93,16 @@ impl RecordBatch {
         Ok(RecordBatch { schema, columns })
     }
 
+    /// Creates a new empty [`RecordBatch`].
+    pub fn new_empty(schema: SchemaRef) -> Self {
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| new_empty_array(field.data_type()))
+            .collect();
+        RecordBatch { schema, columns }
+    }
+
     /// Validate the schema and columns using [`RecordBatchOptions`]. Returns an error
     /// if any validation check fails.
     fn validate_new_batch(
@@ -268,12 +278,13 @@ impl From<&StructArray> for RecordBatch {
     }
 }
 
-impl Into<StructArray> for RecordBatch {
-    fn into(self) -> StructArray {
-        self.schema
+impl From<RecordBatch> for StructArray {
+    fn from(batch: RecordBatch) -> Self {
+        batch
+            .schema
             .fields
             .iter()
-            .zip(self.columns.iter())
+            .zip(batch.columns.iter())
             .map(|t| (t.0.clone(), t.1.clone()))
             .collect::<Vec<(Field, ArrayRef)>>()
             .into()

@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use super::{aggregates, empty::EmptyExec, expressions::binary, functions, udaf};
+use super::{
+    aggregates, empty::EmptyExec, expressions::binary, functions, udaf, union::UnionExec,
+};
 use crate::error::{DataFusionError, Result};
 use crate::execution::context::ExecutionContextState;
 use crate::logical_plan::{
@@ -42,34 +44,38 @@ use crate::physical_plan::{expressions, Distribution};
 use crate::physical_plan::{hash_utils, Partitioning};
 use crate::physical_plan::{AggregateExpr, ExecutionPlan, PhysicalExpr, PhysicalPlanner};
 use crate::prelude::JoinType;
+use crate::scalar::ScalarValue;
 use crate::variable::VarType;
+use arrow::compute::can_cast_types;
+
 use arrow::compute::SortOptions;
 use arrow::datatypes::{Schema, SchemaRef};
 use expressions::col;
 
-/// This trait permits the `DefaultPhysicalPlanner` to create plans for
-/// user defined `ExtensionPlanNode`s
+/// This trait exposes the ability to plan an [`ExecutionPlan`] out of a [`LogicalPlan`].
 pub trait ExtensionPlanner {
-    /// Create a physical plan for an extension node
+    /// Create a physical plan for a [`UserDefinedLogicalNode`].
+    /// This errors when the planner knows how to plan the concrete implementation of `node`
+    /// but errors while doing so, and `None` when the planner does not know how to plan the `node`
+    /// and wants to delegate the planning to another [`ExtensionPlanner`].
     fn plan_extension(
         &self,
         node: &dyn UserDefinedLogicalNode,
-        inputs: Vec<Arc<dyn ExecutionPlan>>,
+        inputs: &[Arc<dyn ExecutionPlan>],
         ctx_state: &ExecutionContextState,
-    ) -> Result<Arc<dyn ExecutionPlan>>;
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>>;
 }
 
 /// Default single node physical query planner that converts a
 /// `LogicalPlan` to an `ExecutionPlan` suitable for execution.
 pub struct DefaultPhysicalPlanner {
-    extension_planner: Arc<dyn ExtensionPlanner + Send + Sync>,
+    extension_planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>>,
 }
 
 impl Default for DefaultPhysicalPlanner {
-    /// Create an implementation of the default physical planner
     fn default() -> Self {
         Self {
-            extension_planner: Arc::new(DefaultExtensionPlanner {}),
+            extension_planners: vec![],
         }
     }
 }
@@ -87,12 +93,14 @@ impl PhysicalPlanner for DefaultPhysicalPlanner {
 }
 
 impl DefaultPhysicalPlanner {
-    /// Create a physical planner that uses `extension_planner` to
-    /// plan extension nodes.
-    pub fn with_extension_planner(
-        extension_planner: Arc<dyn ExtensionPlanner + Send + Sync>,
+    /// Create a physical planner that uses `extension_planners` to
+    /// plan user-defined logical nodes [`LogicalPlan::Extension`].
+    /// The planner uses the first [`ExtensionPlanner`] to return a non-`None`
+    /// plan.
+    pub fn with_extension_planners(
+        extension_planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>>,
     ) -> Self {
-        Self { extension_planner }
+        Self { extension_planners }
     }
 
     /// Create a physical plan from a logical plan
@@ -170,8 +178,9 @@ impl DefaultPhysicalPlanner {
                 source,
                 projection,
                 filters,
+                limit,
                 ..
-            } => source.scan(projection, batch_size, filters),
+            } => source.scan(projection, batch_size, filters, *limit),
             LogicalPlan::Aggregate {
                 input,
                 group_expr,
@@ -180,6 +189,7 @@ impl DefaultPhysicalPlanner {
             } => {
                 // Initially need to perform the aggregate and then merge the partitions
                 let input_exec = self.create_physical_plan(input, ctx_state)?;
+                let input_schema = input_exec.schema();
                 let physical_input_schema = input_exec.as_ref().schema();
                 let logical_input_schema = input.as_ref().schema();
 
@@ -213,6 +223,7 @@ impl DefaultPhysicalPlanner {
                     groups.clone(),
                     aggregates.clone(),
                     input_exec,
+                    input_schema.clone(),
                 )?);
 
                 let final_group: Vec<Arc<dyn PhysicalExpr>> =
@@ -229,6 +240,7 @@ impl DefaultPhysicalPlanner {
                         .collect(),
                     aggregates,
                     initial_aggr,
+                    input_schema,
                 )?))
             }
             LogicalPlan::Projection { input, expr, .. } => {
@@ -257,6 +269,13 @@ impl DefaultPhysicalPlanner {
                 let runtime_expr =
                     self.create_physical_expr(predicate, &input_schema, ctx_state)?;
                 Ok(Arc::new(FilterExec::try_new(runtime_expr, input)?))
+            }
+            LogicalPlan::Union { inputs, .. } => {
+                let physical_plans = inputs
+                    .iter()
+                    .map(|input| self.create_physical_plan(input, ctx_state))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Arc::new(UnionExec::new(physical_plans)))
             }
             LogicalPlan::Repartition {
                 input,
@@ -309,11 +328,7 @@ impl DefaultPhysicalPlanner {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                Ok(Arc::new(SortExec::try_new(
-                    sort_expr,
-                    input,
-                    ctx_state.config.concurrency,
-                )?))
+                Ok(Arc::new(SortExec::try_new(sort_expr, input)?))
             }
             LogicalPlan::Join {
                 left,
@@ -357,11 +372,7 @@ impl DefaultPhysicalPlanner {
                     Arc::new(LocalLimitExec::new(input, limit))
                 };
 
-                Ok(Arc::new(GlobalLimitExec::new(
-                    input,
-                    limit,
-                    ctx_state.config.concurrency,
-                )))
+                Ok(Arc::new(GlobalLimitExec::new(input, limit)))
             }
             LogicalPlan::CreateExternalTable { .. } => {
                 // There is no default plan for "CREATE EXTERNAL
@@ -405,11 +416,19 @@ impl DefaultPhysicalPlanner {
                     .map(|input_plan| self.create_physical_plan(input_plan, ctx_state))
                     .collect::<Result<Vec<_>>>()?;
 
-                let plan = self.extension_planner.plan_extension(
-                    node.as_ref(),
-                    inputs,
-                    ctx_state,
+                let maybe_plan = self.extension_planners.iter().try_fold(
+                    None,
+                    |maybe_plan, planner| {
+                        if let Some(plan) = maybe_plan {
+                            Ok(Some(plan))
+                        } else {
+                            planner.plan_extension(node.as_ref(), &inputs, ctx_state)
+                        }
+                    },
                 )?;
+                let plan = maybe_plan.ok_or_else(|| DataFusionError::Plan(format!(
+                    "No installed planner was able to convert the custom node to an execution plan: {:?}", node
+                )))?;
 
                 // Ensure the ExecutionPlan's  schema matches the
                 // declared logical schema to catch and warn about
@@ -472,7 +491,7 @@ impl DefaultPhysicalPlanner {
             Expr::BinaryExpr { left, op, right } => {
                 let lhs = self.create_physical_expr(left, input_schema, ctx_state)?;
                 let rhs = self.create_physical_expr(right, input_schema, ctx_state)?;
-                binary(lhs, op.clone(), rhs, input_schema)
+                binary(lhs, *op, rhs, input_schema)
             }
             Expr::Case {
                 expr,
@@ -593,6 +612,57 @@ impl DefaultPhysicalPlanner {
                     binary_expr
                 }
             }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => match expr.as_ref() {
+                Expr::Literal(ScalarValue::Utf8(None)) => {
+                    Ok(expressions::lit(ScalarValue::Boolean(None)))
+                }
+                _ => {
+                    let value_expr =
+                        self.create_physical_expr(expr, input_schema, ctx_state)?;
+                    let value_expr_data_type = value_expr.data_type(input_schema)?;
+
+                    let list_exprs =
+                        list.iter()
+                            .map(|expr| match expr {
+                                Expr::Literal(ScalarValue::Utf8(None)) => self
+                                    .create_physical_expr(expr, input_schema, ctx_state),
+                                _ => {
+                                    let list_expr = self.create_physical_expr(
+                                        expr,
+                                        input_schema,
+                                        ctx_state,
+                                    )?;
+                                    let list_expr_data_type =
+                                        list_expr.data_type(input_schema)?;
+
+                                    if list_expr_data_type == value_expr_data_type {
+                                        Ok(list_expr)
+                                    } else if can_cast_types(
+                                        &list_expr_data_type,
+                                        &value_expr_data_type,
+                                    ) {
+                                        expressions::cast(
+                                            list_expr,
+                                            input_schema,
+                                            value_expr.data_type(input_schema)?,
+                                        )
+                                    } else {
+                                        Err(DataFusionError::Plan(format!(
+                                            "Unsupported CAST from {:?} to {:?}",
+                                            list_expr_data_type, value_expr_data_type
+                                        )))
+                                    }
+                                }
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+
+                    expressions::in_list(value_expr, list_exprs, negated)
+                }
+            },
             other => Err(DataFusionError::NotImplemented(format!(
                 "Physical plan does not support logical expression {:?}",
                 other
@@ -676,29 +746,13 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
     }
 }
 
-struct DefaultExtensionPlanner {}
-
-impl ExtensionPlanner for DefaultExtensionPlanner {
-    fn plan_extension(
-        &self,
-        node: &dyn UserDefinedLogicalNode,
-        _inputs: Vec<Arc<dyn ExecutionPlan>>,
-        _ctx_state: &ExecutionContextState,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Err(DataFusionError::NotImplemented(format!(
-            "DefaultPhysicalPlanner does not know how to plan {:?}. \
-                     Provide a custom ExtensionPlanNodePlanner that does",
-            node
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::logical_plan::{DFField, DFSchema, DFSchemaRef};
     use crate::physical_plan::{csv::CsvReadOptions, expressions, Partitioning};
     use crate::prelude::ExecutionConfig;
+    use crate::scalar::ScalarValue;
     use crate::{
         logical_plan::{col, lit, sum, LogicalPlanBuilder},
         physical_plan::SendableRecordBatchStream,
@@ -733,9 +787,9 @@ mod tests {
         let logical_plan = LogicalPlanBuilder::scan_csv(&path, options, None)?
             // filter clause needs the type coercion rule applied
             .filter(col("c7").lt(lit(5_u8)))?
-            .project(vec![col("c1"), col("c2")])?
-            .aggregate(vec![col("c1")], vec![sum(col("c2"))])?
-            .sort(vec![col("c1").sort(true, true)])?
+            .project(&[col("c1"), col("c2")])?
+            .aggregate(&[col("c1")], &[sum(col("c2"))])?
+            .sort(&[col("c1").sort(true, true)])?
             .limit(10)?
             .build()?;
 
@@ -806,18 +860,18 @@ mod tests {
         ];
         for case in cases {
             let logical_plan = LogicalPlanBuilder::scan_csv(&path, options, None)?
-                .project(vec![case.clone()]);
+                .project(&[case.clone()]);
             let message = format!(
                 "Expression {:?} expected to error due to impossible coercion",
                 case
             );
-            assert!(logical_plan.is_err(), message);
+            assert!(logical_plan.is_err(), "{}", message);
         }
         Ok(())
     }
 
     #[test]
-    fn default_extension_planner() -> Result<()> {
+    fn default_extension_planner() {
         let ctx_state = make_ctx_state();
         let planner = DefaultPhysicalPlanner::default();
         let logical_plan = LogicalPlan::Extension {
@@ -825,7 +879,8 @@ mod tests {
         };
         let plan = planner.create_physical_plan(&logical_plan, &ctx_state);
 
-        let expected_error = "DefaultPhysicalPlanner does not know how to plan NoOp";
+        let expected_error =
+            "No installed planner was able to convert the custom node to an execution plan: NoOp";
         match plan {
             Ok(_) => panic!("Expected planning failure"),
             Err(e) => assert!(
@@ -835,17 +890,16 @@ mod tests {
                 expected_error
             ),
         }
-        Ok(())
     }
 
     #[test]
-    fn bad_extension_planner() -> Result<()> {
+    fn bad_extension_planner() {
         // Test that creating an execution plan whose schema doesn't
         // match the logical plan's schema generates an error.
         let ctx_state = make_ctx_state();
-        let planner = DefaultPhysicalPlanner::with_extension_planner(Arc::new(
+        let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             BadExtensionPlanner {},
-        ));
+        )]);
 
         let logical_plan = LogicalPlan::Extension {
             node: Arc::new(NoOpExtensionNode::default()),
@@ -881,6 +935,75 @@ mod tests {
                 expected_error
             ),
         }
+    }
+
+    #[test]
+    fn in_list_types() -> Result<()> {
+        let testdata = arrow::util::test_util::arrow_test_data();
+        let path = format!("{}/csv/aggregate_test_100.csv", testdata);
+        let options = CsvReadOptions::new().schema_infer_max_records(100);
+
+        // expression: "a in ('a', 1)"
+        let list = vec![
+            Expr::Literal(ScalarValue::Utf8(Some("a".to_string()))),
+            Expr::Literal(ScalarValue::Int64(Some(1))),
+        ];
+        let logical_plan = LogicalPlanBuilder::scan_csv(&path, options, None)?
+            // filter clause needs the type coercion rule applied
+            .filter(col("c12").lt(lit(0.05)))?
+            .project(&[col("c1").in_list(list, false)])?
+            .build()?;
+        let execution_plan = plan(&logical_plan)?;
+        // verify that the plan correctly adds cast from Int64(1) to Utf8
+        let expected = "InListExpr { expr: Column { name: \"c1\" }, list: [Literal { value: Utf8(\"a\") }, CastExpr { expr: Literal { value: Int64(1) }, cast_type: Utf8 }], negated: false }";
+        assert!(format!("{:?}", execution_plan).contains(expected));
+
+        // expression: "a in (true, 'a')"
+        let list = vec![
+            Expr::Literal(ScalarValue::Boolean(Some(true))),
+            Expr::Literal(ScalarValue::Utf8(Some("a".to_string()))),
+        ];
+        let logical_plan = LogicalPlanBuilder::scan_csv(&path, options, None)?
+            // filter clause needs the type coercion rule applied
+            .filter(col("c12").lt(lit(0.05)))?
+            .project(&[col("c12").lt_eq(lit(0.025)).in_list(list, false)])?
+            .build()?;
+        let execution_plan = plan(&logical_plan);
+
+        let expected_error = "Unsupported CAST from Utf8 to Boolean";
+        match execution_plan {
+            Ok(_) => panic!("Expected planning failure"),
+            Err(e) => assert!(
+                e.to_string().contains(expected_error),
+                "Error '{}' did not contain expected error '{}'",
+                e.to_string(),
+                expected_error
+            ),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn hash_agg_input_schema() -> Result<()> {
+        let testdata = arrow::util::test_util::arrow_test_data();
+        let path = format!("{}/csv/aggregate_test_100.csv", testdata);
+
+        let options = CsvReadOptions::new().schema_infer_max_records(100);
+        let logical_plan = LogicalPlanBuilder::scan_csv(&path, options, None)?
+            .aggregate(&[col("c1")], &[sum(col("c2"))])?
+            .build()?;
+
+        let execution_plan = plan(&logical_plan)?;
+        let final_hash_agg = execution_plan
+            .as_any()
+            .downcast_ref::<HashAggregateExec>()
+            .expect("hash aggregate");
+        assert_eq!("SUM(c2)", final_hash_agg.schema().field(1).name());
+        // we need access to the input to the partial aggregate so that other projects can
+        // implement serde
+        assert_eq!("c2", final_hash_agg.input_schema().field(1).name());
+
         Ok(())
     }
 
@@ -929,8 +1052,8 @@ mod tests {
 
         fn from_template(
             &self,
-            _exprs: &Vec<Expr>,
-            _inputs: &Vec<LogicalPlan>,
+            _exprs: &[Expr],
+            _inputs: &[LogicalPlan],
         ) -> Arc<dyn UserDefinedLogicalNode + Send + Sync> {
             unimplemented!("NoOp");
         }
@@ -981,16 +1104,16 @@ mod tests {
         fn plan_extension(
             &self,
             _node: &dyn UserDefinedLogicalNode,
-            _inputs: Vec<Arc<dyn ExecutionPlan>>,
+            _inputs: &[Arc<dyn ExecutionPlan>],
             _ctx_state: &ExecutionContextState,
-        ) -> Result<Arc<dyn ExecutionPlan>> {
-            Ok(Arc::new(NoOpExecutionPlan {
+        ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+            Ok(Some(Arc::new(NoOpExecutionPlan {
                 schema: SchemaRef::new(Schema::new(vec![Field::new(
                     "b",
                     DataType::Int32,
                     false,
                 )])),
-            }))
+            })))
         }
     }
 }

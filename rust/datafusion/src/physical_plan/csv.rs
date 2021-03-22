@@ -127,6 +127,8 @@ pub struct CsvExec {
     projected_schema: SchemaRef,
     /// Batch size
     batch_size: usize,
+    /// Limit in nr. of rows
+    limit: Option<usize>,
 }
 
 impl CsvExec {
@@ -136,13 +138,18 @@ impl CsvExec {
         options: CsvReadOptions,
         projection: Option<Vec<usize>>,
         batch_size: usize,
+        limit: Option<usize>,
     ) -> Result<Self> {
         let file_extension = String::from(options.file_extension);
 
         let mut filenames: Vec<String> = vec![];
         common::build_file_list(path, &mut filenames, file_extension.as_str())?;
         if filenames.is_empty() {
-            return Err(DataFusionError::Execution("No files found".to_string()));
+            return Err(DataFusionError::Execution(format!(
+                "No files found at {path} with file extension {file_extension}",
+                path = path,
+                file_extension = file_extension.as_str()
+            )));
         }
 
         let schema = match options.schema {
@@ -165,7 +172,53 @@ impl CsvExec {
             projection,
             projected_schema: Arc::new(projected_schema),
             batch_size,
+            limit,
         })
+    }
+
+    /// Path to directory containing partitioned CSV files with the same schema
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The individual files under path
+    pub fn filenames(&self) -> &[String] {
+        &self.filenames
+    }
+
+    /// Does the CSV file have a header?
+    pub fn has_header(&self) -> bool {
+        self.has_header
+    }
+
+    /// An optional column delimiter. Defaults to `b','`
+    pub fn delimiter(&self) -> Option<&u8> {
+        self.delimiter.as_ref()
+    }
+
+    /// File extension
+    pub fn file_extension(&self) -> &str {
+        &self.file_extension
+    }
+
+    /// Get the schema of the CSV file
+    pub fn file_schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    /// Optional projection for which columns to load
+    pub fn projection(&self) -> Option<&Vec<usize>> {
+        self.projection.as_ref()
+    }
+
+    /// Batch size
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// Limit
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Infer schema for given CSV dataset
@@ -226,6 +279,7 @@ impl ExecutionPlan for CsvExec {
             self.delimiter,
             &self.projection,
             self.batch_size,
+            self.limit,
         )?))
     }
 }
@@ -245,15 +299,19 @@ impl CsvStream {
         delimiter: Option<u8>,
         projection: &Option<Vec<usize>>,
         batch_size: usize,
+        limit: Option<usize>,
     ) -> Result<Self> {
         let file = File::open(filename)?;
+        let start_line = if has_header { 1 } else { 0 };
+        let bounds = limit.map(|x| (0, x + start_line));
+
         let reader = csv::Reader::new(
             file,
             schema,
             has_header,
             delimiter,
             batch_size,
-            None,
+            bounds,
             projection.clone(),
         );
 
@@ -296,9 +354,11 @@ mod tests {
             CsvReadOptions::new().schema(&schema),
             Some(vec![0, 2, 4]),
             1024,
+            None,
         )?;
         assert_eq!(13, csv.schema.fields().len());
         assert_eq!(3, csv.projected_schema.fields().len());
+        assert_eq!(13, csv.file_schema().fields().len());
         assert_eq!(3, csv.schema().fields().len());
         let mut stream = csv.execute(0).await?;
         let batch = stream.next().await.unwrap()?;
@@ -317,10 +377,16 @@ mod tests {
         let testdata = arrow::util::test_util::arrow_test_data();
         let filename = "aggregate_test_100.csv";
         let path = format!("{}/csv/{}", testdata, filename);
-        let csv =
-            CsvExec::try_new(&path, CsvReadOptions::new().schema(&schema), None, 1024)?;
+        let csv = CsvExec::try_new(
+            &path,
+            CsvReadOptions::new().schema(&schema),
+            None,
+            1024,
+            None,
+        )?;
         assert_eq!(13, csv.schema.fields().len());
         assert_eq!(13, csv.projected_schema.fields().len());
+        assert_eq!(13, csv.file_schema().fields().len());
         assert_eq!(13, csv.schema().fields().len());
         let mut it = csv.execute(0).await?;
         let batch = it.next().await.unwrap()?;

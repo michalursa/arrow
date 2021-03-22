@@ -44,6 +44,7 @@
 #' the stream will be left open.
 #' @export
 #' @seealso [RecordBatchWriter] for lower-level access to writing Arrow IPC data.
+#' @seealso [Schema] for information about schemas and metadata handling.
 #' @examples
 #' \donttest{
 #' tf <- tempfile()
@@ -205,7 +206,7 @@ FeatherReader <- R6Class("FeatherReader", inherit = ArrowObject,
 #' @export
 names.FeatherReader <- function(x) x$column_names
 
-FeatherReader$create <- function(file, mmap = TRUE, ...) {
+FeatherReader$create <- function(file) {
   assert_is(file, "RandomAccessFile")
   ipc___feather___Reader__Open(file)
 }

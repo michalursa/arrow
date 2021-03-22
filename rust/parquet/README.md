@@ -23,7 +23,7 @@
 Add this to your Cargo.toml:
 ```toml
 [dependencies]
-parquet = "3.0.0-SNAPSHOT"
+parquet = "4.0.0-SNAPSHOT"
 ```
 
 and this to your crate root:
@@ -44,7 +44,17 @@ while let Some(record) = iter.next() {
     println!("{}", record);
 }
 ```
-See [crate documentation](https://docs.rs/crate/parquet/3.0.0-SNAPSHOT) on available API.
+See [crate documentation](https://docs.rs/crate/parquet/4.0.0-SNAPSHOT) on available API.
+
+## Upgrading from versions prior to 4.0
+
+If you are upgrading from version 3.0 or previous of this crate, you
+likely need to change your code to use [`ConvertedType`] rather than
+[`LogicalType`]. Version 4.0 introduces an *entirely new* struct
+called `LogicalType` to align with the `LogicalType` introduced in
+Parquet Format 2.4.0. The type previously called `LogicalType` was was
+renamed to `ConvertedType`.
+
 
 ## Supported Parquet Version
 - Parquet-format 2.4.0
@@ -79,23 +89,22 @@ enabled by adding `RUSTFLAGS="-C target-feature=+sse4.2"` before the
 `cargo build` command.
 
 ## Test
-Run `cargo test` for unit tests.
+Run `cargo test` for unit tests. To also run tests related to the binaries, use `cargo test --features cli`.
 
 ## Binaries
-The following binaries are provided (use `cargo install` to install them):
+The following binaries are provided (use `cargo install --features cli` to install them):
 - **parquet-schema** for printing Parquet file schema and metadata.
-`Usage: parquet-schema <file-path> [verbose]`, where `file-path` is the path to a Parquet file,
-and optional `verbose` is the boolean flag that allows to print full metadata or schema only
-(when not specified only schema will be printed).
+`Usage: parquet-schema <file-path>`, where `file-path` is the path to a Parquet file. Use `-v/--verbose` flag
+to print full metadata or schema only (when not specified only schema will be printed).
 
 - **parquet-read** for reading records from a Parquet file.
 `Usage: parquet-read <file-path> [num-records]`, where `file-path` is the path to a Parquet file,
 and `num-records` is the number of records to read from a file (when not specified all records will
-be printed).
+be printed). Use `-j/--json` to print records in JSON lines format.
 
 - **parquet-rowcount** for reporting the number of records in one or more Parquet files.
-`Usage: parquet-rowcount <file-path> ...`, where `file-path` is the path to a Parquet file, and `...`
-indicates any number of additional parquet files.
+`Usage: parquet-rowcount <file-paths>...`, where `<file-paths>...` is a space separated list of one or more
+files to read.
 
 If you see `Library not loaded` error, please make sure `LD_LIBRARY_PATH` is set properly:
 ```

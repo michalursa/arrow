@@ -20,11 +20,11 @@
     clippy::float_cmp,
     clippy::module_inception,
     clippy::new_without_default,
-    clippy::ptr_arg,
     clippy::type_complexity
 )]
 
-//! DataFusion is an extensible query execution framework that uses
+//! [DataFusion](https://github.com/apache/arrow/tree/master/rust/datafusion)
+//! is an extensible query execution framework that uses
 //! [Apache Arrow](https://arrow.apache.org) as its in-memory format.
 //!
 //! DataFusion supports both an SQL and a DataFrame API for building logical query plans
@@ -47,7 +47,7 @@
 //!
 //! // create a plan
 //! let df = df.filter(col("a").lt_eq(col("b")))?
-//!            .aggregate(vec![col("a")], vec![min(col("b"))])?
+//!            .aggregate(&[col("a")], &[min(col("b"))])?
 //!            .limit(100)?;
 //!
 //! // execute the plan
@@ -171,3 +171,10 @@ pub mod variable;
 
 #[cfg(test)]
 pub mod test;
+
+#[macro_use]
+#[cfg(feature = "regex_expressions")]
+extern crate lazy_static;
+
+#[cfg(doctest)]
+doc_comment::doctest!("../README.md", readme_example_test);

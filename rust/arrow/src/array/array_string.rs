@@ -24,8 +24,8 @@ use super::{
     array::print_long_array, raw_pointer::RawPtrBox, Array, ArrayData, ArrayDataRef,
     GenericListArray, GenericStringIter, OffsetSizeTrait,
 };
+use crate::buffer::Buffer;
 use crate::util::bit_util;
-use crate::{buffer::Buffer, datatypes::ToByteSlice};
 use crate::{buffer::MutableBuffer, datatypes::DataType};
 
 /// Like OffsetSizeTrait, but specialized for Strings
@@ -50,26 +50,25 @@ pub struct GenericStringArray<OffsetSize: StringOffsetSizeTrait> {
 }
 
 impl<OffsetSize: StringOffsetSizeTrait> GenericStringArray<OffsetSize> {
-    /// Returns the offset for the element at index `i`.
-    ///
-    /// Note this doesn't do any bound checking, for performance reason.
-    #[inline]
-    pub fn value_offset(&self, i: usize) -> OffsetSize {
-        self.value_offset_at(self.data.offset() + i)
-    }
-
     /// Returns the length for the element at index `i`.
-    ///
-    /// Note this doesn't do any bound checking, for performance reason.
     #[inline]
-    pub fn value_length(&self, mut i: usize) -> OffsetSize {
-        i += self.data.offset();
-        self.value_offset_at(i + 1) - self.value_offset_at(i)
+    pub fn value_length(&self, i: usize) -> OffsetSize {
+        let offsets = self.value_offsets();
+        offsets[i + 1] - offsets[i]
     }
 
-    /// Returns a clone of the value offset buffer
-    pub fn value_offsets(&self) -> Buffer {
-        self.data.buffers()[0].clone()
+    /// Returns the offset values in the offsets buffer
+    #[inline]
+    pub fn value_offsets(&self) -> &[OffsetSize] {
+        // Soundness
+        //     pointer alignment & location is ensured by RawPtrBox
+        //     buffer bounds/offset is ensured by the ArrayData instance.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.value_offsets.as_ptr().add(self.data.offset()),
+                self.len() + 1,
+            )
+        }
     }
 
     /// Returns a clone of the value data buffer
@@ -77,22 +76,51 @@ impl<OffsetSize: StringOffsetSizeTrait> GenericStringArray<OffsetSize> {
         self.data.buffers()[1].clone()
     }
 
-    #[inline]
-    fn value_offset_at(&self, i: usize) -> OffsetSize {
-        unsafe { *self.value_offsets.as_ptr().add(i) }
+    /// Returns the element at index
+    /// # Safety
+    /// caller is responsible for ensuring that index is within the array bounds
+    pub unsafe fn value_unchecked(&self, i: usize) -> &str {
+        let end = self.value_offsets().get_unchecked(i + 1);
+        let start = self.value_offsets().get_unchecked(i);
+
+        // Soundness
+        // pointer alignment & location is ensured by RawPtrBox
+        // buffer bounds/offset is ensured by the value_offset invariants
+        // ISSUE: utf-8 well formedness is not checked
+
+        // Safety of `to_isize().unwrap()`
+        // `start` and `end` are &OffsetSize, which is a generic type that implements the
+        // OffsetSizeTrait. Currently, only i32 and i64 implement OffsetSizeTrait,
+        // both of which should cleanly cast to isize on an architecture that supports
+        // 32/64-bit offsets
+        let slice = std::slice::from_raw_parts(
+            self.value_data.as_ptr().offset(start.to_isize().unwrap()),
+            (*end - *start).to_usize().unwrap(),
+        );
+        std::str::from_utf8_unchecked(slice)
     }
 
     /// Returns the element at index `i` as &str
     pub fn value(&self, i: usize) -> &str {
         assert!(i < self.data.len(), "StringArray out of bounds access");
-        let offset = i.checked_add(self.data.offset()).unwrap();
-        unsafe {
-            let pos = self.value_offset_at(offset);
-            let slice = std::slice::from_raw_parts(
-                self.value_data.as_ptr().offset(pos.to_isize()),
-                (self.value_offset_at(offset + 1) - pos).to_usize().unwrap(),
-            );
+        //Soundness: length checked above, offset buffer length is 1 larger than logical array length
+        let end = unsafe { self.value_offsets().get_unchecked(i + 1) };
+        let start = unsafe { self.value_offsets().get_unchecked(i) };
 
+        // Soundness
+        // pointer alignment & location is ensured by RawPtrBox
+        // buffer bounds/offset is ensured by the value_offset invariants
+        // ISSUE: utf-8 well formedness is not checked
+        unsafe {
+            // Safety of `to_isize().unwrap()`
+            // `start` and `end` are &OffsetSize, which is a generic type that implements the
+            // OffsetSizeTrait. Currently, only i32 and i64 implement OffsetSizeTrait,
+            // both of which should cleanly cast to isize on an architecture that supports
+            // 32/64-bit offsets
+            let slice = std::slice::from_raw_parts(
+                self.value_data.as_ptr().offset(start.to_isize().unwrap()),
+                (*end - *start).to_usize().unwrap(),
+            );
             std::str::from_utf8_unchecked(slice)
         }
     }
@@ -128,11 +156,11 @@ impl<OffsetSize: StringOffsetSizeTrait> GenericStringArray<OffsetSize> {
         let mut values = MutableBuffer::new(0);
 
         let mut length_so_far = OffsetSize::zero();
-        offsets.extend_from_slice(length_so_far.to_byte_slice());
+        offsets.push(length_so_far);
 
         for s in &v {
             length_so_far += OffsetSize::from_usize(s.len()).unwrap();
-            offsets.extend_from_slice(length_so_far.to_byte_slice());
+            offsets.push(length_so_far);
             values.extend_from_slice(s.as_bytes());
         }
         let array_data = ArrayData::builder(OffsetSize::DATA_TYPE)
@@ -146,6 +174,36 @@ impl<OffsetSize: StringOffsetSizeTrait> GenericStringArray<OffsetSize> {
     pub(crate) fn from_opt_vec(v: Vec<Option<&str>>) -> Self {
         v.into_iter().collect()
     }
+
+    /// Creates a `GenericStringArray` based on an iterator of values without nulls
+    pub fn from_iter_values<Ptr, I: IntoIterator<Item = Ptr>>(iter: I) -> Self
+    where
+        Ptr: AsRef<str>,
+    {
+        let iter = iter.into_iter();
+        let (_, data_len) = iter.size_hint();
+        let data_len = data_len.expect("Iterator must be sized"); // panic if no upper bound.
+
+        let mut offsets =
+            MutableBuffer::new((data_len + 1) * std::mem::size_of::<OffsetSize>());
+        let mut values = MutableBuffer::new(0);
+
+        let mut length_so_far = OffsetSize::zero();
+        offsets.push(length_so_far);
+
+        for i in iter {
+            let s = i.as_ref();
+            length_so_far += OffsetSize::from_usize(s.len()).unwrap();
+            offsets.push(length_so_far);
+            values.extend_from_slice(s.as_bytes());
+        }
+        let array_data = ArrayData::builder(OffsetSize::DATA_TYPE)
+            .len(data_len)
+            .add_buffer(offsets.into())
+            .add_buffer(values.into())
+            .build();
+        Self::from(array_data)
+    }
 }
 
 impl<'a, Ptr, OffsetSize: StringOffsetSizeTrait> FromIterator<Option<Ptr>>
@@ -158,28 +216,30 @@ where
         let (_, data_len) = iter.size_hint();
         let data_len = data_len.expect("Iterator must be sized"); // panic if no upper bound.
 
-        let mut offsets =
-            MutableBuffer::new((data_len + 1) * std::mem::size_of::<OffsetSize>());
+        let offset_size = std::mem::size_of::<OffsetSize>();
+        let mut offsets = MutableBuffer::new((data_len + 1) * offset_size);
         let mut values = MutableBuffer::new(0);
         let mut null_buf = MutableBuffer::new_null(data_len);
         let null_slice = null_buf.as_slice_mut();
         let mut length_so_far = OffsetSize::zero();
-        offsets.extend_from_slice(length_so_far.to_byte_slice());
+        offsets.push(length_so_far);
 
         for (i, s) in iter.enumerate() {
-            if let Some(s) = s {
-                let s = s.as_ref();
+            let value_bytes = if let Some(ref s) = s {
                 // set null bit
                 bit_util::set_bit(null_slice, i);
-
-                length_so_far += OffsetSize::from_usize(s.len()).unwrap();
-                values.extend_from_slice(s.as_bytes());
+                let s_bytes = s.as_ref().as_bytes();
+                length_so_far += OffsetSize::from_usize(s_bytes.len()).unwrap();
+                s_bytes
             } else {
-                values.extend_from_slice(b"");
-            }
-            offsets.extend_from_slice(length_so_far.to_byte_slice());
+                b""
+            };
+            values.extend_from_slice(value_bytes);
+            offsets.push(length_so_far);
         }
 
+        // calculate actual data_len, which may be different from the iterator's upper bound
+        let data_len = (offsets.len() / offset_size) - 1;
         let array_data = ArrayData::builder(OffsetSize::DATA_TYPE)
             .len(data_len)
             .add_buffer(offsets.into())
@@ -208,7 +268,9 @@ impl<'a, T: StringOffsetSizeTrait> GenericStringArray<T> {
 
 impl<OffsetSize: StringOffsetSizeTrait> fmt::Debug for GenericStringArray<OffsetSize> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}StringArray\n[\n", OffsetSize::prefix())?;
+        let prefix = if OffsetSize::is_large() { "Large" } else { "" };
+
+        write!(f, "{}StringArray\n[\n", prefix)?;
         print_long_array(self, f, |array, index, f| {
             fmt::Debug::fmt(&array.value(index), f)
         })?;
@@ -310,9 +372,12 @@ mod tests {
         assert_eq!(3, string_array.len());
         assert_eq!(0, string_array.null_count());
         assert_eq!("hello", string_array.value(0));
+        assert_eq!("hello", unsafe { string_array.value_unchecked(0) });
         assert_eq!("", string_array.value(1));
+        assert_eq!("", unsafe { string_array.value_unchecked(1) });
         assert_eq!("parquet", string_array.value(2));
-        assert_eq!(5, string_array.value_offset(2));
+        assert_eq!("parquet", unsafe { string_array.value_unchecked(2) });
+        assert_eq!(5, string_array.value_offsets()[2]);
         assert_eq!(7, string_array.value_length(2));
         for i in 0..3 {
             assert!(string_array.is_valid(i));
@@ -337,9 +402,12 @@ mod tests {
         assert_eq!(3, string_array.len());
         assert_eq!(0, string_array.null_count());
         assert_eq!("hello", string_array.value(0));
+        assert_eq!("hello", unsafe { string_array.value_unchecked(0) });
         assert_eq!("", string_array.value(1));
+        assert_eq!("", unsafe { string_array.value_unchecked(1) });
         assert_eq!("parquet", string_array.value(2));
-        assert_eq!(5, string_array.value_offset(2));
+        assert_eq!("parquet", unsafe { string_array.value_unchecked(2) });
+        assert_eq!(5, string_array.value_offsets()[2]);
         assert_eq!(7, string_array.value_length(2));
         for i in 0..3 {
             assert!(string_array.is_valid(i));
@@ -369,12 +437,15 @@ mod tests {
         let first_list = first_slot.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(first_list.len(), 2);
         assert_eq!(first_list.value(0), "foo");
+        assert_eq!(unsafe { first_list.value_unchecked(0) }, "foo");
         assert_eq!(first_list.value(1), "bar");
+        assert_eq!(unsafe { first_list.value_unchecked(1) }, "bar");
 
         let second_slot = list_of_strings.value(1);
         let second_list = second_slot.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(second_list.len(), 1);
         assert_eq!(second_list.value(0), "foobar");
+        assert_eq!(unsafe { second_list.value_unchecked(0) }, "foobar");
     }
 
     #[test]
@@ -386,8 +457,8 @@ mod tests {
         let offsets: [i32; 4] = [0, 5, 5, 12];
         let array_data = ArrayData::builder(DataType::Utf8)
             .len(3)
-            .add_buffer(Buffer::from(offsets.to_byte_slice()))
-            .add_buffer(Buffer::from(&values[..]))
+            .add_buffer(Buffer::from_slice_ref(&offsets))
+            .add_buffer(Buffer::from_slice_ref(&values))
             .build();
         let string_array = StringArray::from(array_data);
         string_array.value(4);
@@ -411,6 +482,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_string_array_from_iter() {
         let data = vec![Some("hello"), None, Some("arrow")];
         // from Vec<Option<&str>>
@@ -423,5 +495,38 @@ mod tests {
 
         assert_eq!(array1, array2);
         assert_eq!(array2, array3);
+    }
+
+    #[test]
+    fn test_string_array_from_iter_values() {
+        let data = vec!["hello", "hello2"];
+        let array1 = StringArray::from_iter_values(data.iter());
+
+        assert_eq!(array1.value(0), "hello");
+        assert_eq!(array1.value(1), "hello2");
+    }
+
+    #[test]
+    fn test_string_array_from_unbound_iter() {
+        // iterator that doesn't declare (upper) size bound
+        let string_iter = (0..)
+            .scan(0usize, |pos, i| {
+                if *pos < 10 {
+                    *pos += 1;
+                    Some(Some(format!("value {}", i)))
+                } else {
+                    // actually returns up to 10 values
+                    None
+                }
+            })
+            // limited using take()
+            .take(100);
+
+        let (_, upper_size_bound) = string_iter.size_hint();
+        // the upper bound, defined by take above, is 100
+        assert_eq!(upper_size_bound, Some(100));
+        let string_array: StringArray = string_iter.collect();
+        // but the actual number of items in the array should be 10
+        assert_eq!(string_array.len(), 10);
     }
 }

@@ -88,7 +88,8 @@ def scalar(value):
     return Expression._scalar(value)
 
 
-def partitioning(schema=None, field_names=None, flavor=None):
+def partitioning(schema=None, field_names=None, flavor=None,
+                 dictionaries=None):
     """
     Specify a partitioning scheme.
 
@@ -121,6 +122,13 @@ def partitioning(schema=None, field_names=None, flavor=None):
     flavor : str, default None
         The default is DirectoryPartitioning. Specify ``flavor="hive"`` for
         a HivePartitioning.
+    dictionaries : Dict[str, Array]
+        If the type of any field of `schema` is a dictionary type, the
+        corresponding entry of `dictionaries` must be an array containing
+        every value which may be taken by the corresponding column or an
+        error will be raised in parsing. Alternatively, pass `infer` to have
+        Arrow discover the dictionary values, in which case a
+        PartitioningFactory is returned.
 
     Returns
     -------
@@ -140,6 +148,27 @@ def partitioning(schema=None, field_names=None, flavor=None):
     For paths like "/2009/June", the year will be inferred as int32 while month
     will be inferred as string.
 
+    Specify a Schema with dictionary encoding, providing dictionary values:
+
+    >>> partitioning(
+    ...     pa.schema([
+    ...         ("year", pa.int16()),
+    ...         ("month", pa.dictionary(pa.int8(), pa.string()))
+    ...     ]),
+    ...     dictionaries={
+    ...         "month": pa.array(["January", "February", "March"]),
+    ...     })
+
+    Alternatively, specify a Schema with dictionary encoding, but have Arrow
+    infer the dictionary values:
+
+    >>> partitioning(
+    ...     pa.schema([
+    ...         ("year", pa.int16()),
+    ...         ("month", pa.dictionary(pa.int8(), pa.string()))
+    ...     ]),
+    ...     dictionaries="infer")
+
     Create a Hive scheme for a path like "/year=2009/month=11":
 
     >>> partitioning(
@@ -158,7 +187,9 @@ def partitioning(schema=None, field_names=None, flavor=None):
             if field_names is not None:
                 raise ValueError(
                     "Cannot specify both 'schema' and 'field_names'")
-            return DirectoryPartitioning(schema)
+            if dictionaries == 'infer':
+                return DirectoryPartitioning.discover(schema=schema)
+            return DirectoryPartitioning(schema, dictionaries)
         elif field_names is not None:
             if isinstance(field_names, list):
                 return DirectoryPartitioning.discover(field_names)
@@ -175,7 +206,9 @@ def partitioning(schema=None, field_names=None, flavor=None):
             raise ValueError("Cannot specify 'field_names' for flavor 'hive'")
         elif schema is not None:
             if isinstance(schema, pa.Schema):
-                return HivePartitioning(schema)
+                if dictionaries == 'infer':
+                    return HivePartitioning.discover(schema=schema)
+                return HivePartitioning(schema, dictionaries)
             else:
                 raise ValueError(
                     "Expected Schema for 'schema', got {}".format(
@@ -306,7 +339,7 @@ def _ensure_single_source(path, filesystem=None):
         If an URI is passed, then its path component will act as a prefix for
         the file paths.
 
-   Returns
+    Returns
     -------
     (FileSystem, list of str or fs.Selector)
         File system object and either a single item list pointing to a file or
@@ -635,7 +668,8 @@ def _ensure_write_partitioning(scheme):
 
 def write_dataset(data, base_dir, basename_template=None, format=None,
                   partitioning=None, schema=None,
-                  filesystem=None, file_options=None, use_threads=True):
+                  filesystem=None, file_options=None, use_threads=True,
+                  max_partitions=None):
     """
     Write a dataset to a given format and partitioning.
 
@@ -668,8 +702,10 @@ def write_dataset(data, base_dir, basename_template=None, format=None,
     use_threads : bool, default True
         Write files in parallel. If enabled, then maximum parallelism will be
         used determined by the number of available CPU cores.
+    max_partitions : int, default 1024
+        Maximum number of partitions any batch may be written into.
     """
-    from pyarrow.fs import LocalFileSystem, _ensure_filesystem
+    from pyarrow.fs import _resolve_filesystem_and_path
 
     if isinstance(data, Dataset):
         schema = schema or data.schema
@@ -700,15 +736,15 @@ def write_dataset(data, base_dir, basename_template=None, format=None,
     if basename_template is None:
         basename_template = "part-{i}." + format.default_extname
 
+    if max_partitions is None:
+        max_partitions = 1024
+
     partitioning = _ensure_write_partitioning(partitioning)
 
-    if filesystem is None:
-        # fall back to local file system as the default
-        filesystem = LocalFileSystem()
-    else:
-        filesystem = _ensure_filesystem(filesystem)
+    filesystem, base_dir = _resolve_filesystem_and_path(base_dir, filesystem)
 
     _filesystemdataset_write(
         data, base_dir, basename_template, schema,
         filesystem, partitioning, file_options, use_threads,
+        max_partitions
     )

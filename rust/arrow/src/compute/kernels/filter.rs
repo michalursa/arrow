@@ -42,7 +42,7 @@ enum State {
 /// slots of a [BooleanArray] are true. Each interval corresponds to a contiguous region of memory to be
 /// "taken" from an array to be filtered.
 #[derive(Debug)]
-struct SlicesIterator<'a> {
+pub(crate) struct SlicesIterator<'a> {
     iter: Enumerate<BitChunkIterator<'a>>,
     state: State,
     filter_count: usize,
@@ -57,7 +57,7 @@ struct SlicesIterator<'a> {
 }
 
 impl<'a> SlicesIterator<'a> {
-    fn new(filter: &'a BooleanArray) -> Self {
+    pub(crate) fn new(filter: &'a BooleanArray) -> Self {
         let values = &filter.data_ref().buffers()[0];
 
         // this operation is performed before iteration
@@ -249,7 +249,6 @@ pub fn filter_record_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datatypes::ToByteSlice;
     use crate::{
         buffer::Buffer,
         datatypes::{DataType, Field},
@@ -505,10 +504,10 @@ mod tests {
     fn test_filter_list_array() {
         let value_data = ArrayData::builder(DataType::Int32)
             .len(8)
-            .add_buffer(Buffer::from(&[0, 1, 2, 3, 4, 5, 6, 7].to_byte_slice()))
+            .add_buffer(Buffer::from_slice_ref(&[0, 1, 2, 3, 4, 5, 6, 7]))
             .build();
 
-        let value_offsets = Buffer::from(&[0i64, 3, 6, 8, 8].to_byte_slice());
+        let value_offsets = Buffer::from_slice_ref(&[0i64, 3, 6, 8, 8]);
 
         let list_data_type =
             DataType::LargeList(Box::new(Field::new("item", DataType::Int32, false)));
@@ -527,10 +526,10 @@ mod tests {
         // expected: [[3, 4, 5], null]
         let value_data = ArrayData::builder(DataType::Int32)
             .len(3)
-            .add_buffer(Buffer::from(&[3, 4, 5].to_byte_slice()))
+            .add_buffer(Buffer::from_slice_ref(&[3, 4, 5]))
             .build();
 
-        let value_offsets = Buffer::from(&[0i64, 3, 3].to_byte_slice());
+        let value_offsets = Buffer::from_slice_ref(&[0i64, 3, 3]);
 
         let list_data_type =
             DataType::LargeList(Box::new(Field::new("item", DataType::Int32, false)));

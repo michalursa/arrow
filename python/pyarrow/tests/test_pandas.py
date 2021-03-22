@@ -2272,6 +2272,33 @@ class TestConvertStructTypes:
         series = pd.Series(arr.to_pandas())
         tm.assert_series_equal(series, expected)
 
+    def test_to_pandas_multiple_chunks(self):
+        # ARROW-11855
+        gc.collect()
+        bytes_start = pa.total_allocated_bytes()
+        ints1 = pa.array([1], type=pa.int64())
+        ints2 = pa.array([2], type=pa.int64())
+        arr1 = pa.StructArray.from_arrays([ints1], ['ints'])
+        arr2 = pa.StructArray.from_arrays([ints2], ['ints'])
+        arr = pa.chunked_array([arr1, arr2])
+
+        expected = pd.Series([
+            {'ints': 1},
+            {'ints': 2}
+        ])
+
+        series = pd.Series(arr.to_pandas())
+        tm.assert_series_equal(series, expected)
+
+        del series
+        del arr
+        del arr1
+        del arr2
+        del ints1
+        del ints2
+        bytes_end = pa.total_allocated_bytes()
+        assert bytes_end == bytes_start
+
     def test_from_numpy(self):
         dt = np.dtype([('x', np.int32),
                        (('y_title', 'y'), np.bool_)])
@@ -2818,12 +2845,12 @@ def test_roundtrip_with_bytes_unicode(columns):
 
 
 def _check_serialize_components_roundtrip(pd_obj):
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         ctx = pa.default_serialization_context()
 
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         components = ctx.serialize(pd_obj).to_components()
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         deserialized = ctx.deserialize_components(components)
 
     if isinstance(pd_obj, pd.DataFrame):
@@ -3874,7 +3901,11 @@ def test_array_protocol_pandas_extension_types(monkeypatch):
 def _Int64Dtype__from_arrow__(self, array):
     # for test only deal with single chunk for now
     # TODO: do we require handling of chunked arrays in the protocol?
-    arr = array.chunk(0)
+    if isinstance(array, pa.Array):
+        arr = array
+    else:
+        # ChunkedArray - here only deal with a single chunk for the test
+        arr = array.chunk(0)
     buflist = arr.buffers()
     data = np.frombuffer(buflist[-1], dtype='int64')[
         arr.offset:arr.offset + len(arr)]
@@ -3905,7 +3936,8 @@ def test_convert_to_extension_array(monkeypatch):
     # Int64Dtype is recognized -> convert to extension block by default
     # for a proper roundtrip
     result = table.to_pandas()
-    assert isinstance(result._data.blocks[0], _int.IntBlock)
+    assert not isinstance(result._data.blocks[0], _int.ExtensionBlock)
+    assert result._data.blocks[0].values.dtype == np.dtype("int64")
     assert isinstance(result._data.blocks[1], _int.ExtensionBlock)
     tm.assert_frame_equal(result, df)
 
@@ -3926,7 +3958,7 @@ def test_convert_to_extension_array(monkeypatch):
     # Int64Dtype has no __from_arrow__ -> use normal conversion
     result = table.to_pandas()
     assert len(result._data.blocks) == 1
-    assert isinstance(result._data.blocks[0], _int.IntBlock)
+    assert not isinstance(result._data.blocks[0], _int.ExtensionBlock)
 
 
 class MyCustomIntegerType(pa.PyExtensionType):

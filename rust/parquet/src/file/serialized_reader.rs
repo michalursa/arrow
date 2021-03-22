@@ -137,6 +137,24 @@ impl<R: 'static + ChunkReader> SerializedFileReader<R> {
             metadata,
         })
     }
+
+    /// Filters row group metadata to only those row groups,
+    /// for which the predicate function returns true
+    pub fn filter_row_groups(
+        &mut self,
+        predicate: &dyn Fn(&RowGroupMetaData, usize) -> bool,
+    ) {
+        let mut filtered_row_groups = Vec::<RowGroupMetaData>::new();
+        for (i, row_group_metadata) in self.metadata.row_groups().iter().enumerate() {
+            if predicate(row_group_metadata, i) {
+                filtered_row_groups.push(row_group_metadata.clone());
+            }
+        }
+        self.metadata = ParquetMetaData::new(
+            self.metadata.file_metadata().clone(),
+            filtered_row_groups,
+        );
+    }
 }
 
 impl<R: 'static + ChunkReader> FileReader for SerializedFileReader<R> {
@@ -433,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_reader_into_iter() -> Result<()> {
+    fn test_file_reader_into_iter() {
         let path = get_test_path("alltypes_plain.parquet");
         let vec = vec![path.clone(), path]
             .iter()
@@ -445,12 +463,10 @@ mod tests {
         // rows in the parquet file are not sorted by "id"
         // each file contains [id:4, id:5, id:6, id:7, id:2, id:3, id:0, id:1]
         assert_eq!(vec, vec![4, 5, 6, 7, 2, 3, 0, 1, 4, 5, 6, 7, 2, 3, 0, 1]);
-
-        Ok(())
     }
 
     #[test]
-    fn test_file_reader_into_iter_project() -> Result<()> {
+    fn test_file_reader_into_iter_project() {
         let path = get_test_path("alltypes_plain.parquet");
         let result = vec![path]
             .iter()
@@ -469,8 +485,6 @@ mod tests {
             result,
             "{id: 4},{id: 5},{id: 6},{id: 7},{id: 2},{id: 3},{id: 0},{id: 1}"
         );
-
-        Ok(())
     }
 
     #[test]
@@ -736,5 +750,22 @@ mod tests {
             metadata.get(2).unwrap().value,
             Some("foo.baz.Foobaz$Event".to_owned())
         );
+    }
+
+    #[test]
+    fn test_file_reader_filter_row_groups() -> Result<()> {
+        let test_file = get_test_file("alltypes_plain.parquet");
+        let mut reader = SerializedFileReader::new(test_file)?;
+
+        // test initial number of row groups
+        let metadata = reader.metadata();
+        assert_eq!(metadata.num_row_groups(), 1);
+
+        // test filtering out all row groups
+        reader.filter_row_groups(&|_, _| false);
+        let metadata = reader.metadata();
+        assert_eq!(metadata.num_row_groups(), 0);
+
+        Ok(())
     }
 }

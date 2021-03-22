@@ -18,7 +18,7 @@
 #' @importFrom R6 R6Class
 #' @importFrom purrr as_mapper map map2 map_chr map_dfr map_int map_lgl keep
 #' @importFrom assertthat assert_that is.string
-#' @importFrom rlang list2 %||% is_false abort dots_n warn enquo quo_is_null enquos is_integerish quos eval_tidy new_data_mask syms env env_bind as_label set_names exec is_bare_character
+#' @importFrom rlang list2 %||% is_false abort dots_n warn enquo quo_is_null enquos is_integerish quos eval_tidy new_data_mask syms env new_environment env_bind as_label set_names exec is_bare_character
 #' @importFrom tidyselect vars_select
 #' @useDynLib arrow, .registration = TRUE
 #' @keywords internal
@@ -30,10 +30,11 @@
     "dplyr::",
     c(
       "select", "filter", "collect", "summarise", "group_by", "groups",
-      "group_vars", "ungroup", "mutate", "arrange", "rename", "pull"
+      "group_vars", "group_by_drop_default", "ungroup", "mutate", "transmute",
+      "arrange", "rename", "pull"
     )
   )
-  for (cl in c("Dataset", "RecordBatch", "Table", "arrow_dplyr_query")) {
+  for (cl in c("Dataset", "ArrowTabular", "arrow_dplyr_query")) {
     for (m in dplyr_methods) {
       s3_register(m, cl)
     }
@@ -45,6 +46,10 @@
     s3_register("reticulate::r_to_py", cl)
   }
 
+  # Create these once, at package build time
+  dplyr_functions$dataset <- build_function_list(build_dataset_expression)
+  dplyr_functions$array <- build_function_list(build_array_expression)
+
   invisible()
 }
 
@@ -53,17 +58,34 @@
 #' You won't generally need to call these function, but they're made available
 #' for diagnostic purposes.
 #' @return `TRUE` or `FALSE` depending on whether the package was installed
-#' with the Arrow C++ library (check with `arrow_available()`) or with S3
-#' support enabled (check with `arrow_with_s3()`).
+#' with:
+#' * The Arrow C++ library (check with `arrow_available()`)
+#' * Arrow Dataset support enabled (check with `arrow_with_dataset()`)
+#' * Parquet support enabled (check with `arrow_with_parquet()`)
+#' * Amazon S3 support enabled (check with `arrow_with_s3()`)
 #' @export
 #' @examples
 #' arrow_available()
+#' arrow_with_dataset()
+#' arrow_with_parquet()
 #' arrow_with_s3()
-#' @seealso If either of these are `FALSE`, see
+#' @seealso If any of these are `FALSE`, see
 #' `vignette("install", package = "arrow")` for guidance on reinstalling the
 #' package.
 arrow_available <- function() {
   .Call(`_arrow_available`)
+}
+
+#' @rdname arrow_available
+#' @export
+arrow_with_dataset <- function() {
+  .Call(`_dataset_available`)
+}
+
+#' @rdname arrow_available
+#' @export
+arrow_with_parquet <- function() {
+  .Call(`_parquet_available`)
 }
 
 #' @rdname arrow_available
@@ -74,6 +96,93 @@ arrow_with_s3 <- function() {
 
 option_use_threads <- function() {
   !is_false(getOption("arrow.use_threads"))
+}
+
+#' Report information on the package's capabilities
+#'
+#' This function summarizes a number of build-time configurations and run-time
+#' settings for the Arrow package. It may be useful for diagnostics.
+#' @return A list including version information, boolean "capabilities", and
+#' statistics from Arrow's memory allocator, and also Arrow's run-time
+#' information.
+#' @export
+#' @importFrom utils packageVersion
+arrow_info <- function() {
+  opts <- options()
+  out <- list(
+    version = packageVersion("arrow"),
+    libarrow = arrow_available(),
+    options = opts[grep("^arrow\\.", names(opts))]
+  )
+  if (out$libarrow) {
+    pool <- default_memory_pool()
+    runtimeinfo <- runtime_info()
+    out <- c(out, list(
+      capabilities = c(
+        dataset = arrow_with_dataset(),
+        parquet = arrow_with_parquet(),
+        s3 = arrow_with_s3(),
+        vapply(tolower(names(CompressionType)[-1]), codec_is_available, logical(1))
+      ),
+      memory_pool = list(
+        backend_name = pool$backend_name,
+        bytes_allocated = pool$bytes_allocated,
+        max_memory = pool$max_memory,
+        available_backends = supported_memory_backends()
+      ),
+      runtime_info = list(
+        simd_level = runtimeinfo[1],
+        detected_simd_level = runtimeinfo[2]
+      )
+    ))
+  }
+  structure(out, class = "arrow_info")
+}
+
+#' @export
+print.arrow_info <- function(x, ...) {
+  print_key_values <- function(title, vals, ...) {
+    # Make a key-value table for printing, no column names
+    df <- data.frame(vals, stringsAsFactors = FALSE, ...)
+    names(df) <- ""
+
+    cat(title, ":\n", sep = "")
+    print(df)
+    cat("\n")
+  }
+  cat("Arrow package version: ", format(x$version), "\n\n", sep = "")
+  if (x$libarrow) {
+    print_key_values("Capabilities", c(
+      x$capabilities,
+      jemalloc = "jemalloc" %in% x$memory_pool$available_backends,
+      mimalloc = "mimalloc" %in% x$memory_pool$available_backends
+    ))
+
+    if (length(x$options)) {
+      print_key_values("Arrow options()", map_chr(x$options, format))
+    }
+
+    format_bytes <- function(b, units = "auto", digits = 2L, ...) {
+      format(structure(b, class = "object_size"), units = units, digits = digits, ...)
+    }
+    print_key_values("Memory", c(
+      Allocator = x$memory_pool$backend_name,
+      # utils:::format.object_size is not properly vectorized
+      Current = format_bytes(x$memory_pool$bytes_allocated, ...),
+      Max = format_bytes(x$memory_pool$max_memory, ...)
+    ))
+    print_key_values("Runtime", c(
+      `SIMD Level` = x$runtime_info$simd_level,
+      `Detected SIMD Level` = x$runtime_info$detected_simd_level
+    ))
+  } else {
+    cat("Arrow C++ library not available\n")
+  }
+  invisible(x)
+}
+
+option_compress_metadata <- function() {
+  !is_false(getOption("arrow.compress_metadata"))
 }
 
 #' @include enums.R

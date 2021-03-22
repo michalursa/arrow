@@ -15,8 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::error::{DataFusionError, Result};
 use crate::logical_plan::{DFSchema, Expr, LogicalPlan};
+use crate::{
+    error::{DataFusionError, Result},
+    logical_plan::{ExpressionVisitor, Recursion},
+};
+use std::collections::HashMap;
 
 /// Resolves an `Expr::Wildcard` to a collection of `Expr::Column`'s.
 pub(crate) fn expand_wildcard(expr: &Expr, schema: &DFSchema) -> Vec<Expr> {
@@ -33,7 +37,7 @@ pub(crate) fn expand_wildcard(expr: &Expr, schema: &DFSchema) -> Vec<Expr> {
 /// Collect all deeply nested `Expr::AggregateFunction` and
 /// `Expr::AggregateUDF`. They are returned in order of occurrence (depth
 /// first), with duplicates omitted.
-pub(crate) fn find_aggregate_exprs(exprs: &Vec<Expr>) -> Vec<Expr> {
+pub(crate) fn find_aggregate_exprs(exprs: &[Expr]) -> Vec<Expr> {
     find_exprs_in_exprs(exprs, &|nested_expr| {
         matches!(
             nested_expr,
@@ -44,14 +48,14 @@ pub(crate) fn find_aggregate_exprs(exprs: &Vec<Expr>) -> Vec<Expr> {
 
 /// Collect all deeply nested `Expr::Column`'s. They are returned in order of
 /// appearance (depth first), with duplicates omitted.
-pub(crate) fn find_column_exprs(exprs: &Vec<Expr>) -> Vec<Expr> {
+pub(crate) fn find_column_exprs(exprs: &[Expr]) -> Vec<Expr> {
     find_exprs_in_exprs(exprs, &|nested_expr| matches!(nested_expr, Expr::Column(_)))
 }
 
 /// Search the provided `Expr`'s, and all of their nested `Expr`, for any that
 /// pass the provided test. The returned `Expr`'s are deduplicated and returned
 /// in order of appearance (depth first).
-fn find_exprs_in_exprs<F>(exprs: &Vec<Expr>, test_fn: &F) -> Vec<Expr>
+fn find_exprs_in_exprs<F>(exprs: &[Expr], test_fn: &F) -> Vec<Expr>
 where
     F: Fn(&Expr) -> bool,
 {
@@ -66,6 +70,45 @@ where
         })
 }
 
+// Visitor that find expressions that match a particular predicate
+struct Finder<'a, F>
+where
+    F: Fn(&Expr) -> bool,
+{
+    test_fn: &'a F,
+    exprs: Vec<Expr>,
+}
+
+impl<'a, F> Finder<'a, F>
+where
+    F: Fn(&Expr) -> bool,
+{
+    /// Create a new finder with the `test_fn`
+    fn new(test_fn: &'a F) -> Self {
+        Self {
+            test_fn,
+            exprs: Vec::new(),
+        }
+    }
+}
+
+impl<'a, F> ExpressionVisitor for Finder<'a, F>
+where
+    F: Fn(&Expr) -> bool,
+{
+    fn pre_visit(mut self, expr: &Expr) -> Result<Recursion<Self>> {
+        if (self.test_fn)(expr) {
+            if !(self.exprs.contains(expr)) {
+                self.exprs.push(expr.clone())
+            }
+            // stop recursing down this expr once we find a match
+            return Ok(Recursion::Stop(self));
+        }
+
+        Ok(Recursion::Continue(self))
+    }
+}
+
 /// Search an `Expr`, and all of its nested `Expr`'s, for any that pass the
 /// provided test. The returned `Expr`'s are deduplicated and returned in order
 /// of appearance (depth first).
@@ -73,92 +116,11 @@ fn find_exprs_in_expr<F>(expr: &Expr, test_fn: &F) -> Vec<Expr>
 where
     F: Fn(&Expr) -> bool,
 {
-    let matched_exprs = if test_fn(expr) {
-        vec![expr.clone()]
-    } else {
-        match expr {
-            Expr::AggregateFunction { args, .. } => find_exprs_in_exprs(&args, test_fn),
-            Expr::AggregateUDF { args, .. } => find_exprs_in_exprs(&args, test_fn),
-            Expr::Alias(nested_expr, _) => {
-                find_exprs_in_expr(nested_expr.as_ref(), test_fn)
-            }
-            Expr::Between {
-                expr: nested_expr,
-                low,
-                high,
-                ..
-            } => {
-                let mut matches = vec![];
-                matches.extend(find_exprs_in_expr(nested_expr.as_ref(), test_fn));
-                matches.extend(find_exprs_in_expr(low.as_ref(), test_fn));
-                matches.extend(find_exprs_in_expr(high.as_ref(), test_fn));
-                matches
-            }
-            Expr::BinaryExpr { left, right, .. } => {
-                let mut matches = vec![];
-                matches.extend(find_exprs_in_expr(left.as_ref(), test_fn));
-                matches.extend(find_exprs_in_expr(right.as_ref(), test_fn));
-                matches
-            }
-            Expr::Case {
-                expr: case_expr_opt,
-                when_then_expr,
-                else_expr: else_expr_opt,
-            } => {
-                let mut matches = vec![];
-
-                if let Some(case_expr) = case_expr_opt {
-                    matches.extend(find_exprs_in_expr(case_expr.as_ref(), test_fn));
-                }
-
-                matches.extend(
-                    when_then_expr
-                        .iter()
-                        .flat_map(|(a, b)| vec![a, b])
-                        .flat_map(|expr| find_exprs_in_expr(expr.as_ref(), test_fn))
-                        .collect::<Vec<Expr>>(),
-                );
-
-                if let Some(else_expr) = else_expr_opt {
-                    matches.extend(find_exprs_in_expr(else_expr.as_ref(), test_fn));
-                }
-
-                matches
-            }
-            Expr::Cast {
-                expr: nested_expr, ..
-            } => find_exprs_in_expr(nested_expr.as_ref(), test_fn),
-            Expr::IsNotNull(nested_expr) => {
-                find_exprs_in_expr(nested_expr.as_ref(), test_fn)
-            }
-            Expr::IsNull(nested_expr) => {
-                find_exprs_in_expr(nested_expr.as_ref(), test_fn)
-            }
-            Expr::Negative(nested_expr) => {
-                find_exprs_in_expr(nested_expr.as_ref(), test_fn)
-            }
-            Expr::Not(nested_expr) => find_exprs_in_expr(nested_expr.as_ref(), test_fn),
-            Expr::ScalarFunction { args, .. } => find_exprs_in_exprs(&args, test_fn),
-            Expr::ScalarUDF { args, .. } => find_exprs_in_exprs(&args, test_fn),
-            Expr::Sort {
-                expr: nested_expr, ..
-            } => find_exprs_in_expr(nested_expr.as_ref(), test_fn),
-
-            // These expressions don't nest other expressions.
-            Expr::Column(_)
-            | Expr::Literal(_)
-            | Expr::ScalarVariable(_)
-            | Expr::Wildcard => vec![],
-        }
-    };
-
-    matched_exprs.into_iter().fold(vec![], |mut acc, expr| {
-        if !acc.contains(&expr) {
-            acc.push(expr)
-        }
-
-        acc
-    })
+    let Finder { exprs, .. } = expr
+        .accept(Finder::new(test_fn))
+        // pre_visit always returns OK, so this will always too
+        .expect("no way to return error during recursion");
+    exprs
 }
 
 /// Convert any `Expr` to an `Expr::Column`.
@@ -185,7 +147,7 @@ pub(crate) fn expr_as_column_expr(expr: &Expr, plan: &LogicalPlan) -> Result<Exp
 /// `a + b` found in the GROUP BY.
 pub(crate) fn rebase_expr(
     expr: &Expr,
-    base_exprs: &Vec<Expr>,
+    base_exprs: &[Expr],
     plan: &LogicalPlan,
 ) -> Result<Expr> {
     clone_with_replacement(expr, &|nested_expr| {
@@ -200,8 +162,8 @@ pub(crate) fn rebase_expr(
 /// Determines if the set of `Expr`'s are a valid projection on the input
 /// `Expr::Column`'s.
 pub(crate) fn can_columns_satisfy_exprs(
-    columns: &Vec<Expr>,
-    exprs: &Vec<Expr>,
+    columns: &[Expr],
+    exprs: &[Expr],
 ) -> Result<bool> {
     columns.iter().try_for_each(|c| match c {
         Expr::Column(_) => Ok(()),
@@ -277,9 +239,21 @@ where
                 low: Box::new(clone_with_replacement(&**low, replacement_fn)?),
                 high: Box::new(clone_with_replacement(&**high, replacement_fn)?),
             }),
+            Expr::InList {
+                expr: nested_expr,
+                list,
+                negated,
+            } => Ok(Expr::InList {
+                expr: Box::new(clone_with_replacement(&**nested_expr, replacement_fn)?),
+                list: list
+                    .iter()
+                    .map(|e| clone_with_replacement(e, replacement_fn))
+                    .collect::<Result<Vec<Expr>>>()?,
+                negated: *negated,
+            }),
             Expr::BinaryExpr { left, right, op } => Ok(Expr::BinaryExpr {
                 left: Box::new(clone_with_replacement(&**left, replacement_fn)?),
-                op: op.clone(),
+                op: *op,
                 right: Box::new(clone_with_replacement(&**right, replacement_fn)?),
             }),
             Expr::Case {
@@ -361,4 +335,36 @@ where
             Expr::Wildcard => Ok(Expr::Wildcard),
         },
     }
+}
+
+/// Returns mapping of each alias (`String`) to the expression (`Expr`) it is
+/// aliasing.
+pub(crate) fn extract_aliases(exprs: &[Expr]) -> HashMap<String, Expr> {
+    exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            Expr::Alias(nested_expr, alias_name) => {
+                Some((alias_name.clone(), *nested_expr.clone()))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<String, Expr>>()
+}
+
+/// Rebuilds an `Expr` with columns that refer to aliases replaced by the
+/// alias' underlying `Expr`.
+pub(crate) fn resolve_aliases_to_exprs(
+    expr: &Expr,
+    aliases: &HashMap<String, Expr>,
+) -> Result<Expr> {
+    clone_with_replacement(expr, &|nested_expr| match nested_expr {
+        Expr::Column(name) => {
+            if let Some(aliased_expr) = aliases.get(name) {
+                Ok(Some(aliased_expr.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    })
 }

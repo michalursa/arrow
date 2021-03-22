@@ -107,7 +107,7 @@ class CrossbowCommentFormatter:
         ),
         'travis': _markdown_badge.format(
             title='TravisCI',
-            url='https://travis-ci.org/{repo}/branches',
+            url='https://travis-ci.com/{repo}/branches',
             badge='https://img.shields.io/travis/{repo}/{branch}.svg'
         ),
         'circle': _markdown_badge.format(
@@ -244,7 +244,7 @@ def actions(ctx):
 
 
 @actions.group()
-@click.option('--crossbow', '-c', default='ursa-labs/crossbow',
+@click.option('--crossbow', '-c', default='ursacomputing/crossbow',
               help='Crossbow repository on github to use')
 @click.pass_obj
 def crossbow(obj, crossbow):

@@ -22,12 +22,16 @@ use std::{collections::HashSet, sync::Arc};
 use arrow::datatypes::Schema;
 
 use super::optimizer::OptimizerRule;
-use crate::error::{DataFusionError, Result};
 use crate::logical_plan::{
-    Expr, LogicalPlan, Operator, Partitioning, PlanType, StringifiedPlan, ToDFSchema,
+    Expr, LogicalPlan, Operator, Partitioning, PlanType, Recursion, StringifiedPlan,
+    ToDFSchema,
 };
-use crate::prelude::{col, lit};
+use crate::prelude::lit;
 use crate::scalar::ScalarValue;
+use crate::{
+    error::{DataFusionError, Result},
+    logical_plan::ExpressionVisitor,
+};
 
 const CASE_EXPR_MARKER: &str = "__DATAFUSION_CASE_EXPR__";
 const CASE_ELSE_MARKER: &str = "__DATAFUSION_CASE_ELSE__";
@@ -46,82 +50,62 @@ pub fn exprlist_to_column_names(
 
 /// Recursively walk an expression tree, collecting the unique set of column names
 /// referenced in the expression
-pub fn expr_to_column_names(expr: &Expr, accum: &mut HashSet<String>) -> Result<()> {
-    match expr {
-        Expr::Alias(expr, _) => expr_to_column_names(expr, accum),
-        Expr::Column(name) => {
-            accum.insert(name.clone());
-            Ok(())
-        }
-        Expr::ScalarVariable(var_names) => {
-            accum.insert(var_names.join("."));
-            Ok(())
-        }
-        Expr::Literal(_) => {
-            // not needed
-            Ok(())
-        }
-        Expr::Not(e) => expr_to_column_names(e, accum),
-        Expr::Negative(e) => expr_to_column_names(e, accum),
-        Expr::IsNull(e) => expr_to_column_names(e, accum),
-        Expr::IsNotNull(e) => expr_to_column_names(e, accum),
-        Expr::BinaryExpr { left, right, .. } => {
-            expr_to_column_names(left, accum)?;
-            expr_to_column_names(right, accum)?;
-            Ok(())
-        }
-        Expr::Case {
-            expr,
-            when_then_expr,
-            else_expr,
-            ..
-        } => {
-            if let Some(e) = expr {
-                expr_to_column_names(e, accum)?;
+struct ColumnNameVisitor<'a> {
+    accum: &'a mut HashSet<String>,
+}
+
+impl ExpressionVisitor for ColumnNameVisitor<'_> {
+    fn pre_visit(self, expr: &Expr) -> Result<Recursion<Self>> {
+        match expr {
+            Expr::Column(name) => {
+                self.accum.insert(name.clone());
             }
-            for (w, t) in when_then_expr {
-                expr_to_column_names(w, accum)?;
-                expr_to_column_names(t, accum)?;
+            Expr::ScalarVariable(var_names) => {
+                self.accum.insert(var_names.join("."));
             }
-            if let Some(e) = else_expr {
-                expr_to_column_names(e, accum)?
-            }
-            Ok(())
+            Expr::Alias(_, _) => {}
+            Expr::Literal(_) => {}
+            Expr::BinaryExpr { .. } => {}
+            Expr::Not(_) => {}
+            Expr::IsNotNull(_) => {}
+            Expr::IsNull(_) => {}
+            Expr::Negative(_) => {}
+            Expr::Between { .. } => {}
+            Expr::Case { .. } => {}
+            Expr::Cast { .. } => {}
+            Expr::Sort { .. } => {}
+            Expr::ScalarFunction { .. } => {}
+            Expr::ScalarUDF { .. } => {}
+            Expr::AggregateFunction { .. } => {}
+            Expr::AggregateUDF { .. } => {}
+            Expr::InList { .. } => {}
+            Expr::Wildcard => {}
         }
-        Expr::Cast { expr, .. } => expr_to_column_names(expr, accum),
-        Expr::Sort { expr, .. } => expr_to_column_names(expr, accum),
-        Expr::AggregateFunction { args, .. } => exprlist_to_column_names(args, accum),
-        Expr::AggregateUDF { args, .. } => exprlist_to_column_names(args, accum),
-        Expr::ScalarFunction { args, .. } => exprlist_to_column_names(args, accum),
-        Expr::ScalarUDF { args, .. } => exprlist_to_column_names(args, accum),
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            expr_to_column_names(expr, accum)?;
-            expr_to_column_names(low, accum)?;
-            expr_to_column_names(high, accum)?;
-            Ok(())
-        }
-        Expr::Wildcard => Err(DataFusionError::Internal(
-            "Wildcard expressions are not valid in a logical query plan".to_owned(),
-        )),
+        Ok(Recursion::Continue(self))
     }
+}
+
+/// Recursively walk an expression tree, collecting the unique set of column names
+/// referenced in the expression
+pub fn expr_to_column_names(expr: &Expr, accum: &mut HashSet<String>) -> Result<()> {
+    expr.accept(ColumnNameVisitor { accum })?;
+    Ok(())
 }
 
 /// Create a `LogicalPlan::Explain` node by running `optimizer` on the
 /// input plan and capturing the resulting plan string
 pub fn optimize_explain(
-    optimizer: &mut impl OptimizerRule,
+    optimizer: &impl OptimizerRule,
     verbose: bool,
     plan: &LogicalPlan,
-    stringified_plans: &Vec<StringifiedPlan>,
+    stringified_plans: &[StringifiedPlan],
     schema: &Schema,
 ) -> Result<LogicalPlan> {
     // These are the fields of LogicalPlan::Explain It might be nice
     // to transform that enum Variant into its own struct and avoid
     // passing the fields individually
     let plan = Arc::new(optimizer.optimize(plan)?);
-    let mut stringified_plans = stringified_plans.clone();
+    let mut stringified_plans = stringified_plans.to_vec();
     let optimizer_name = optimizer.name().into();
     stringified_plans.push(StringifiedPlan::new(
         PlanType::OptimizedLogicalPlan { optimizer_name },
@@ -135,69 +119,50 @@ pub fn optimize_explain(
     })
 }
 
-/// returns all expressions (non-recursively) in the current logical plan node.
-pub fn expressions(plan: &LogicalPlan) -> Vec<Expr> {
-    match plan {
-        LogicalPlan::Projection { expr, .. } => expr.clone(),
-        LogicalPlan::Filter { predicate, .. } => vec![predicate.clone()],
-        LogicalPlan::Repartition {
-            partitioning_scheme,
-            ..
-        } => match partitioning_scheme {
-            Partitioning::Hash(expr, _) => expr.clone(),
-            _ => vec![],
-        },
-        LogicalPlan::Aggregate {
-            group_expr,
-            aggr_expr,
-            ..
-        } => {
-            let mut result = group_expr.clone();
-            result.extend(aggr_expr.clone());
-            result
-        }
-        LogicalPlan::Join { on, .. } => {
-            on.iter().flat_map(|(l, r)| vec![col(l), col(r)]).collect()
-        }
-        LogicalPlan::Sort { expr, .. } => expr.clone(),
-        LogicalPlan::Extension { node } => node.expressions(),
-        // plans without expressions
-        LogicalPlan::TableScan { .. }
-        | LogicalPlan::EmptyRelation { .. }
-        | LogicalPlan::Limit { .. }
-        | LogicalPlan::CreateExternalTable { .. }
-        | LogicalPlan::Explain { .. } => vec![],
+/// Convenience rule for writing optimizers: recursively invoke
+/// optimize on plan's children and then return a node of the same
+/// type. Useful for optimizer rules which want to leave the type
+/// of plan unchanged but still apply to the children.
+/// This also handles the case when the `plan` is a [`LogicalPlan::Explain`].
+pub fn optimize_children(
+    optimizer: &impl OptimizerRule,
+    plan: &LogicalPlan,
+) -> Result<LogicalPlan> {
+    if let LogicalPlan::Explain {
+        verbose,
+        plan,
+        stringified_plans,
+        schema,
+    } = plan
+    {
+        return optimize_explain(
+            optimizer,
+            *verbose,
+            &*plan,
+            stringified_plans,
+            &schema.as_ref().to_owned().into(),
+        );
     }
-}
 
-/// returns all inputs in the logical plan
-pub fn inputs(plan: &LogicalPlan) -> Vec<&LogicalPlan> {
-    match plan {
-        LogicalPlan::Projection { input, .. } => vec![input],
-        LogicalPlan::Filter { input, .. } => vec![input],
-        LogicalPlan::Repartition { input, .. } => vec![input],
-        LogicalPlan::Aggregate { input, .. } => vec![input],
-        LogicalPlan::Sort { input, .. } => vec![input],
-        LogicalPlan::Join { left, right, .. } => vec![left, right],
-        LogicalPlan::Limit { input, .. } => vec![input],
-        LogicalPlan::Extension { node } => node.inputs(),
-        // plans without inputs
-        LogicalPlan::TableScan { .. }
-        | LogicalPlan::EmptyRelation { .. }
-        | LogicalPlan::CreateExternalTable { .. }
-        | LogicalPlan::Explain { .. } => vec![],
-    }
+    let new_exprs = plan.expressions();
+    let new_inputs = plan
+        .inputs()
+        .into_iter()
+        .map(|plan| optimizer.optimize(plan))
+        .collect::<Result<Vec<_>>>()?;
+
+    from_plan(plan, &new_exprs, &new_inputs)
 }
 
 /// Returns a new logical plan based on the original one with inputs and expressions replaced
 pub fn from_plan(
     plan: &LogicalPlan,
-    expr: &Vec<Expr>,
-    inputs: &Vec<LogicalPlan>,
+    expr: &[Expr],
+    inputs: &[LogicalPlan],
 ) -> Result<LogicalPlan> {
     match plan {
         LogicalPlan::Projection { schema, .. } => Ok(LogicalPlan::Projection {
-            expr: expr.clone(),
+            expr: expr.to_vec(),
             input: Arc::new(inputs[0].clone()),
             schema: schema.clone(),
         }),
@@ -227,7 +192,7 @@ pub fn from_plan(
             schema: schema.clone(),
         }),
         LogicalPlan::Sort { .. } => Ok(LogicalPlan::Sort {
-            expr: expr.clone(),
+            expr: expr.to_vec(),
             input: Arc::new(inputs[0].clone()),
         }),
         LogicalPlan::Join {
@@ -248,6 +213,11 @@ pub fn from_plan(
         }),
         LogicalPlan::Extension { node } => Ok(LogicalPlan::Extension {
             node: node.from_template(expr, inputs),
+        }),
+        LogicalPlan::Union { schema, alias, .. } => Ok(LogicalPlan::Union {
+            inputs: inputs.to_vec(),
+            schema: schema.clone(),
+            alias: alias.clone(),
         }),
         LogicalPlan::EmptyRelation { .. }
         | LogicalPlan::TableScan { .. }
@@ -305,6 +275,13 @@ pub fn expr_sub_expressions(expr: &Expr) -> Result<Vec<Expr>> {
             low.as_ref().to_owned(),
             high.as_ref().to_owned(),
         ]),
+        Expr::InList { expr, list, .. } => {
+            let mut expr_list: Vec<Expr> = vec![expr.as_ref().to_owned()];
+            for list_expr in list {
+                expr_list.push(list_expr.to_owned());
+            }
+            Ok(expr_list)
+        }
         Expr::Wildcard { .. } => Err(DataFusionError::Internal(
             "Wildcard expressions are not valid in a logical query plan".to_owned(),
         )),
@@ -314,31 +291,31 @@ pub fn expr_sub_expressions(expr: &Expr) -> Result<Vec<Expr>> {
 /// returns a new expression where the expressions in `expr` are replaced by the ones in
 /// `expressions`.
 /// This is used in conjunction with ``expr_expressions`` to re-write expressions.
-pub fn rewrite_expression(expr: &Expr, expressions: &Vec<Expr>) -> Result<Expr> {
+pub fn rewrite_expression(expr: &Expr, expressions: &[Expr]) -> Result<Expr> {
     match expr {
         Expr::BinaryExpr { op, .. } => Ok(Expr::BinaryExpr {
             left: Box::new(expressions[0].clone()),
-            op: op.clone(),
+            op: *op,
             right: Box::new(expressions[1].clone()),
         }),
         Expr::IsNull(_) => Ok(Expr::IsNull(Box::new(expressions[0].clone()))),
         Expr::IsNotNull(_) => Ok(Expr::IsNotNull(Box::new(expressions[0].clone()))),
         Expr::ScalarFunction { fun, .. } => Ok(Expr::ScalarFunction {
             fun: fun.clone(),
-            args: expressions.clone(),
+            args: expressions.to_vec(),
         }),
         Expr::ScalarUDF { fun, .. } => Ok(Expr::ScalarUDF {
             fun: fun.clone(),
-            args: expressions.clone(),
+            args: expressions.to_vec(),
         }),
         Expr::AggregateFunction { fun, distinct, .. } => Ok(Expr::AggregateFunction {
             fun: fun.clone(),
-            args: expressions.clone(),
+            args: expressions.to_vec(),
             distinct: *distinct,
         }),
         Expr::AggregateUDF { fun, .. } => Ok(Expr::AggregateUDF {
             fun: fun.clone(),
-            args: expressions.clone(),
+            args: expressions.to_vec(),
         }),
         Expr::Case { .. } => {
             let mut base_expr: Option<Box<Expr>> = None;
@@ -416,6 +393,7 @@ pub fn rewrite_expression(expr: &Expr, expressions: &Vec<Expr>) -> Result<Expr> 
                 Ok(expr)
             }
         }
+        Expr::InList { .. } => Ok(expr.clone()),
         Expr::Wildcard { .. } => Err(DataFusionError::Internal(
             "Wildcard expressions are not valid in a logical query plan".to_owned(),
         )),
@@ -454,7 +432,7 @@ mod tests {
     struct TestOptimizer {}
 
     impl OptimizerRule for TestOptimizer {
-        fn optimize(&mut self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
             Ok(plan.clone())
         }
 
@@ -465,16 +443,16 @@ mod tests {
 
     #[test]
     fn test_optimize_explain() -> Result<()> {
-        let mut optimizer = TestOptimizer {};
+        let optimizer = TestOptimizer {};
 
         let empty_plan = LogicalPlanBuilder::empty(false).build()?;
         let schema = LogicalPlan::explain_schema();
 
         let optimized_explain = optimize_explain(
-            &mut optimizer,
+            &optimizer,
             true,
             &empty_plan,
-            &vec![StringifiedPlan::new(PlanType::LogicalPlan, "...")],
+            &[StringifiedPlan::new(PlanType::LogicalPlan, "...")],
             schema.as_ref(),
         )?;
 

@@ -16,11 +16,11 @@
 // under the License.
 
 //! Contains implementation of record assembly and converting Parquet types into
-//! [`Row`](crate::record::api::Row)s.
+//! [`Row`](crate::record::Row)s.
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use crate::basic::{LogicalType, Repetition};
+use crate::basic::{ConvertedType, Repetition};
 use crate::errors::{ParquetError, Result};
 use crate::file::reader::{FileReader, RowGroupReader};
 use crate::record::{
@@ -138,9 +138,9 @@ impl TreeBuilder {
             let column = TripletIter::new(col_descr, col_reader, self.batch_size);
             Reader::PrimitiveReader(field, column)
         } else {
-            match field.get_basic_info().logical_type() {
+            match field.get_basic_info().converted_type() {
                 // List types
-                LogicalType::LIST => {
+                ConvertedType::LIST => {
                     assert_eq!(
                         field.get_fields().len(),
                         1,
@@ -198,7 +198,7 @@ impl TreeBuilder {
                     }
                 }
                 // Map types (key-value pairs)
-                LogicalType::MAP | LogicalType::MAP_KEY_VALUE => {
+                ConvertedType::MAP | ConvertedType::MAP_KEY_VALUE => {
                     assert_eq!(
                         field.get_fields().len(),
                         1,
@@ -269,7 +269,7 @@ impl TreeBuilder {
                 _ if repetition == Repetition::REPEATED => {
                     let required_field = Type::group_type_builder(field.name())
                         .with_repetition(Repetition::REQUIRED)
-                        .with_logical_type(field.get_basic_info().logical_type())
+                        .with_converted_type(field.get_basic_info().converted_type())
                         .with_fields(&mut Vec::from(field.get_fields()))
                         .build()
                         .unwrap();
@@ -346,7 +346,7 @@ impl Reader {
     /// Returns true if repeated type is an element type for the list.
     /// Used to determine legacy list types.
     /// This method is copied from Spark Parquet reader and is based on the reference:
-    /// https://github.com/apache/parquet-format/blob/master/LogicalTypes.md
+    /// <https://github.com/apache/parquet-format/blob/master/LogicalTypes.md>
     ///   #backward-compatibility-rules
     fn is_element_type(repeated_type: &Type) -> bool {
         // For legacy 2-level list types with primitive element type, e.g.:
@@ -628,7 +628,7 @@ impl<'a> Either<'a> {
     }
 }
 
-/// Iterator of [`Row`](crate::record::api::Row)s.
+/// Iterator of [`Row`](crate::record::Row)s.
 /// It is used either for a single row group to iterate over data in that row group, or
 /// an entire file with auto buffering of all row groups.
 pub struct RowIter<'a> {
@@ -641,7 +641,7 @@ pub struct RowIter<'a> {
 }
 
 impl<'a> RowIter<'a> {
-    /// Creates a new iterator of [`Row`](crate::record::api::Row)s.
+    /// Creates a new iterator of [`Row`](crate::record::Row)s.
     fn new(
         file_reader: Option<Either<'a>>,
         row_iter: Option<ReaderIter>,
@@ -663,7 +663,7 @@ impl<'a> RowIter<'a> {
         }
     }
 
-    /// Creates iterator of [`Row`](crate::record::api::Row)s for all row groups in a
+    /// Creates iterator of [`Row`](crate::record::Row)s for all row groups in a
     /// file.
     pub fn from_file(proj: Option<Type>, reader: &'a FileReader) -> Result<Self> {
         let either = Either::Left(reader);
@@ -675,7 +675,7 @@ impl<'a> RowIter<'a> {
         Ok(Self::new(Some(either), None, descr))
     }
 
-    /// Creates iterator of [`Row`](crate::record::api::Row)s for a specific row group.
+    /// Creates iterator of [`Row`](crate::record::Row)s for a specific row group.
     pub fn from_row_group(
         proj: Option<Type>,
         reader: &'a RowGroupReader,
@@ -689,7 +689,7 @@ impl<'a> RowIter<'a> {
         Ok(Self::new(None, Some(row_iter), descr))
     }
 
-    /// Creates a iterator of [`Row`](crate::record::api::Row)s from a
+    /// Creates a iterator of [`Row`](crate::record::Row)s from a
     /// [`FileReader`](crate::file::reader::FileReader) using the full file schema.
     pub fn from_file_into(reader: Box<FileReader>) -> Self {
         let either = Either::Right(reader);
@@ -702,7 +702,7 @@ impl<'a> RowIter<'a> {
         Self::new(Some(either), None, descr)
     }
 
-    /// Tries to create a iterator of [`Row`](crate::record::api::Row)s using projections.
+    /// Tries to create a iterator of [`Row`](crate::record::Row)s using projections.
     /// Returns a error if a file reader is not the source of this iterator.
     ///
     /// The Projected schema can be a subset of or equal to the file schema,
@@ -784,7 +784,7 @@ impl<'a> Iterator for RowIter<'a> {
     }
 }
 
-/// Internal iterator of [`Row`](crate::record::api::Row)s for a reader.
+/// Internal iterator of [`Row`](crate::record::Row)s for a reader.
 pub struct ReaderIter {
     root_reader: Reader,
     records_left: usize,
@@ -1522,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_reader_iter() -> Result<()> {
+    fn test_file_reader_iter() {
         let path = get_test_path("alltypes_plain.parquet");
         let vec = vec![path]
             .iter()
@@ -1532,12 +1532,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(vec, vec![4, 5, 6, 7, 2, 3, 0, 1]);
-
-        Ok(())
     }
 
     #[test]
-    fn test_file_reader_iter_projection() -> Result<()> {
+    fn test_file_reader_iter_projection() {
         let path = get_test_path("alltypes_plain.parquet");
         let values = vec![path]
             .iter()
@@ -1553,8 +1551,6 @@ mod tests {
             .join(", ");
 
         assert_eq!(values, "id:4, id:5, id:6, id:7, id:2, id:3, id:0, id:1");
-
-        Ok(())
     }
 
     #[test]

@@ -66,6 +66,8 @@ jobs:
         run: |
           export CARGO_HOME="/github/home/.cargo"
           export CARGO_TARGET_DIR="/github/home/target"
+          # do not produce debug symbols to keep memory usage down
+          export RUSTFLAGS="-C debuginfo=0"
           cd rust
           cargo build
 
@@ -108,15 +110,20 @@ jobs:
         run: |
           export CARGO_HOME="/github/home/.cargo"
           export CARGO_TARGET_DIR="/github/home/target"
+          # do not produce debug symbols to keep memory usage down
+          export RUSTFLAGS="-C debuginfo=0"
           cd rust
+          # run tests on all workspace members with default feature list
           cargo test
           # test datafusion examples
           cd datafusion
+          cargo test --no-default-features --features cli
           cargo run --example csv_sql
           cargo run --example parquet_sql
           cd ..
           cd arrow
-          cargo test
+          # re-run tests on arrow workspace with additional features
+          cargo test --features=prettyprint
           cargo run --example builders
           cargo run --example dynamic_types
           cargo run --example read_csv
@@ -159,6 +166,8 @@ jobs:
         run: |
           export CARGO_HOME="/github/home/.cargo"
           export CARGO_TARGET_DIR="/github/home/target"
+          # do not produce debug symbols to keep memory usage down
+          export RUSTFLAGS="-C debuginfo=0"
           cd rust/arrow
           cargo test --features "simd"
 
@@ -225,6 +234,41 @@ jobs:
           export CARGO_TARGET_DIR="/github/home/target"
           cd rust
           cargo clippy --all-targets --workspace -- -D warnings -A clippy::redundant_field_names
+
+  miri-checks:
+    name: Miri Checks
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64]
+        rust: [nightly-2021-01-19]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-miri-${{ hashFiles('**/Cargo.lock') }}
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install ${{ matrix.rust }}
+          rustup default ${{ matrix.rust }}
+          rustup component add rustfmt clippy miri
+      - name: Run Miri Checks
+        env:
+          RUST_BACKTRACE: full
+          RUST_LOG: 'trace'
+        run: |
+          export MIRIFLAGS="-Zmiri-disable-isolation"
+          cd rust
+          cargo miri setup
+          cargo clean
+          # Ignore MIRI errors until we can get a clean run
+          cargo miri test || true
 
   coverage:
     name: Coverage
@@ -350,5 +394,7 @@ jobs:
         run: |
           export CARGO_HOME="/github/home/.cargo"
           export CARGO_TARGET_DIR="/github/home/target"
+          # do not produce debug symbols to keep memory usage down
+          export RUSTFLAGS="-C debuginfo=0"
           cd rust/arrow
           cargo build --target wasm32-unknown-unknown

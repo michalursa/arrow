@@ -126,6 +126,35 @@ struct OptionsWrapper : public KernelState {
   OptionsType options;
 };
 
+/// KernelState adapter for when the state is an instance constructed with the
+/// KernelContext and the FunctionOptions as argument
+template <typename StateType, typename OptionsType>
+struct KernelStateFromFunctionOptions : public KernelState {
+  explicit KernelStateFromFunctionOptions(KernelContext* ctx, OptionsType state)
+      : state(StateType(ctx, std::move(state))) {}
+
+  static std::unique_ptr<KernelState> Init(KernelContext* ctx,
+                                           const KernelInitArgs& args) {
+    if (auto options = static_cast<const OptionsType*>(args.options)) {
+      return ::arrow::internal::make_unique<KernelStateFromFunctionOptions>(ctx,
+                                                                            *options);
+    }
+
+    ctx->SetStatus(
+        Status::Invalid("Attempted to initialize KernelState from null FunctionOptions"));
+    return NULLPTR;
+  }
+
+  static const StateType& Get(const KernelState& state) {
+    return ::arrow::internal::checked_cast<const KernelStateFromFunctionOptions&>(state)
+        .state;
+  }
+
+  static const StateType& Get(KernelContext* ctx) { return Get(*ctx->state()); }
+
+  StateType state;
+};
+
 // ----------------------------------------------------------------------
 // Input and output value type definitions
 
@@ -159,6 +188,16 @@ struct GetViewType<Decimal128Type> {
   }
 };
 
+template <>
+struct GetViewType<Decimal256Type> {
+  using T = Decimal256;
+  using PhysicalType = util::string_view;
+
+  static T LogicalValue(PhysicalType value) {
+    return Decimal256(reinterpret_cast<const uint8_t*>(value.data()));
+  }
+};
+
 template <typename Type, typename Enable = void>
 struct GetOutputType;
 
@@ -175,6 +214,11 @@ struct GetOutputType<Type, enable_if_t<is_string_like_type<Type>::value>> {
 template <>
 struct GetOutputType<Decimal128Type> {
   using T = Decimal128;
+};
+
+template <>
+struct GetOutputType<Decimal256Type> {
+  using T = Decimal256;
 };
 
 // ----------------------------------------------------------------------
@@ -367,6 +411,7 @@ const std::vector<std::shared_ptr<DataType>>& SignedIntTypes();
 const std::vector<std::shared_ptr<DataType>>& UnsignedIntTypes();
 const std::vector<std::shared_ptr<DataType>>& IntTypes();
 const std::vector<std::shared_ptr<DataType>>& FloatingPointTypes();
+const std::vector<Type::type>& DecimalTypeIds();
 
 ARROW_EXPORT
 const std::vector<TimeUnit::type>& AllTimeUnits();
@@ -413,7 +458,7 @@ namespace applicator {
 // static void Call(KernelContext*, const ArrayData& in, ArrayData* out)
 // static void Call(KernelContext*, const Scalar& in, Scalar* out)
 template <typename Operator>
-void SimpleUnary(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+static void SimpleUnary(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
   if (batch[0].kind() == Datum::SCALAR) {
     Operator::Call(ctx, *batch[0].scalar(), out->scalar().get());
   } else if (batch.length > 0) {
@@ -435,7 +480,7 @@ void SimpleUnary(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
 // static void Call(KernelContext*, const Scalar& arg0, const Scalar& arg1,
 //                  Scalar* out)
 template <typename Operator>
-void SimpleBinary(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+static void SimpleBinary(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
   if (batch.length == 0) return;
 
   if (batch[0].kind() == Datum::ARRAY) {
@@ -634,14 +679,16 @@ struct ScalarUnaryNotNullStateful {
     static void Exec(const ThisType& functor, KernelContext* ctx, const ArrayData& arg0,
                      Datum* out) {
       ArrayData* out_arr = out->mutable_array();
-      auto out_data = out_arr->GetMutableValues<uint8_t>(1);
+      // Decimal128 data buffers are not safely reinterpret_cast-able on big-endian
+      using endian_agnostic = std::array<uint8_t, sizeof(Decimal128)>;
+      auto out_data = out_arr->GetMutableValues<endian_agnostic>(1);
       VisitArrayValuesInline<Arg0Type>(
           arg0,
           [&](Arg0Value v) {
-            functor.op.template Call<OutValue, Arg0Value>(ctx, v).ToBytes(out_data);
-            out_data += 16;
+            functor.op.template Call<OutValue, Arg0Value>(ctx, v).ToBytes(
+                out_data++->data());
           },
-          [&]() { out_data += 16; });
+          [&]() { ++out_data; });
     }
   };
 
@@ -1154,8 +1201,42 @@ ArrayKernelExec GenerateTemporal(detail::GetTypeId get_id) {
   }
 }
 
+// Generate a kernel given a templated functor for decimal types
+//
+// See "Numeric" above for description of the generator functor
+template <template <typename...> class Generator, typename Type0, typename... Args>
+ArrayKernelExec GenerateDecimal(detail::GetTypeId get_id) {
+  switch (get_id.id) {
+    case Type::DECIMAL128:
+      return Generator<Type0, Decimal128Type, Args...>::Exec;
+    case Type::DECIMAL256:
+      return Generator<Type0, Decimal256Type, Args...>::Exec;
+    default:
+      DCHECK(false);
+      return ExecFail;
+  }
+}
+
 // END of kernel generator-dispatchers
 // ----------------------------------------------------------------------
+
+ARROW_EXPORT
+void EnsureDictionaryDecoded(std::vector<ValueDescr>* descrs);
+
+ARROW_EXPORT
+void ReplaceNullWithOtherType(std::vector<ValueDescr>* descrs);
+
+ARROW_EXPORT
+void ReplaceTypes(const std::shared_ptr<DataType>&, std::vector<ValueDescr>* descrs);
+
+ARROW_EXPORT
+std::shared_ptr<DataType> CommonNumeric(const std::vector<ValueDescr>& descrs);
+
+ARROW_EXPORT
+std::shared_ptr<DataType> CommonTimestamp(const std::vector<ValueDescr>& descrs);
+
+ARROW_EXPORT
+std::shared_ptr<DataType> CommonBinary(const std::vector<ValueDescr>& descrs);
 
 }  // namespace internal
 }  // namespace compute

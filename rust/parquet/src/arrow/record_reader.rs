@@ -54,7 +54,7 @@ impl<T: DataType> RecordReader<T> {
         let (def_levels, null_map) = if column_schema.max_def_level() > 0 {
             (
                 Some(MutableBuffer::new(MIN_BATCH_SIZE)),
-                Some(BooleanBufferBuilder::new(MIN_BATCH_SIZE)),
+                Some(BooleanBufferBuilder::new(0)),
             )
         } else {
             (None, None)
@@ -161,14 +161,14 @@ impl<T: DataType> RecordReader<T> {
             let num_bytes = num_left_values * size_of::<i16>();
             let new_len = self.num_values * size_of::<i16>();
 
-            new_buffer.resize(num_bytes);
+            new_buffer.resize(num_bytes, 0);
 
             let new_def_levels = new_buffer.as_slice_mut();
             let left_def_levels = &def_levels_buf.as_slice_mut()[new_len..];
 
             new_def_levels[0..num_bytes].copy_from_slice(&left_def_levels[0..num_bytes]);
 
-            def_levels_buf.resize(new_len);
+            def_levels_buf.resize(new_len, 0);
             Some(new_buffer)
         } else {
             None
@@ -188,14 +188,14 @@ impl<T: DataType> RecordReader<T> {
             let num_bytes = num_left_values * size_of::<i16>();
             let new_len = self.num_values * size_of::<i16>();
 
-            new_buffer.resize(num_bytes);
+            new_buffer.resize(num_bytes, 0);
 
             let new_rep_levels = new_buffer.as_slice_mut();
             let left_rep_levels = &rep_levels_buf.as_slice_mut()[new_len..];
 
             new_rep_levels[0..num_bytes].copy_from_slice(&left_rep_levels[0..num_bytes]);
 
-            rep_levels_buf.resize(new_len);
+            rep_levels_buf.resize(new_len, 0);
 
             Some(new_buffer)
         } else {
@@ -215,14 +215,14 @@ impl<T: DataType> RecordReader<T> {
         let num_bytes = num_left_values * T::get_type_size();
         let new_len = self.num_values * T::get_type_size();
 
-        new_buffer.resize(num_bytes);
+        new_buffer.resize(num_bytes, 0);
 
         let new_records = new_buffer.as_slice_mut();
         let left_records = &mut self.records.as_slice_mut()[new_len..];
 
         new_records[0..num_bytes].copy_from_slice(&left_records[0..num_bytes]);
 
-        self.records.resize(new_len);
+        self.records.resize(new_len, 0);
 
         Ok(replace(&mut self.records, new_buffer).into())
     }
@@ -279,12 +279,12 @@ impl<T: DataType> RecordReader<T> {
     fn read_one_batch(&mut self, batch_size: usize) -> Result<usize> {
         // Reserve spaces
         self.records
-            .resize(self.records.len() + batch_size * T::get_type_size());
+            .resize(self.records.len() + batch_size * T::get_type_size(), 0);
         if let Some(ref mut buf) = self.rep_levels {
-            buf.resize(buf.len() + batch_size * size_of::<i16>());
+            buf.resize(buf.len() + batch_size * size_of::<i16>(), 0);
         }
         if let Some(ref mut buf) = self.def_levels {
-            buf.resize(buf.len() + batch_size * size_of::<i16>());
+            buf.resize(buf.len() + batch_size * size_of::<i16>(), 0);
         }
 
         let values_written = self.values_written;
@@ -369,6 +369,7 @@ impl<T: DataType> RecordReader<T> {
 
     /// Split values into records according repetition definition and returns number of
     /// records read.
+    #[allow(clippy::unnecessary_wraps)]
     fn split_records(&mut self, records_to_read: usize) -> Result<usize> {
         let rep_levels = self.rep_levels.as_ref().map(|buf| {
             let (prefix, rep_levels, suffix) =
@@ -410,19 +411,20 @@ impl<T: DataType> RecordReader<T> {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn set_values_written(&mut self, new_values_written: usize) -> Result<()> {
         self.values_written = new_values_written;
         self.records
-            .resize(self.values_written * T::get_type_size());
+            .resize(self.values_written * T::get_type_size(), 0);
 
         let new_levels_len = self.values_written * size_of::<i16>();
 
         if let Some(ref mut buf) = self.rep_levels {
-            buf.resize(new_levels_len)
+            buf.resize(new_levels_len, 0)
         };
 
         if let Some(ref mut buf) = self.def_levels {
-            buf.resize(new_levels_len)
+            buf.resize(new_levels_len, 0)
         };
 
         Ok(())

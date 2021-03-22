@@ -111,12 +111,6 @@ class PrepareTest < Test::Unit::TestCase
         ],
       },
       {
-        path: "#{base_dir}/apache-arrow/debian.ubuntu-xenial/changelog",
-        sampled_hunks: [
-          "+apache-arrow (#{@release_version}-1) unstable; urgency=low",
-        ],
-      },
-      {
         path: "#{base_dir}/apache-arrow/debian/changelog",
         sampled_hunks: [
           "+apache-arrow (#{@release_version}-1) unstable; urgency=low",
@@ -162,6 +156,13 @@ class PrepareTest < Test::Unit::TestCase
                      hunks: [
                        ["-set(ARROW_VERSION \"#{@snapshot_version}\")",
                         "+set(ARROW_VERSION \"#{@release_version}\")"],
+                     ],
+                   },
+                   {
+                     path: "cpp/vcpkg.json",
+                     hunks: [
+                       ["-  \"version-string\": \"#{@snapshot_version}\",",
+                        "+  \"version-string\": \"#{@release_version}\","],
                      ],
                    },
                    {
@@ -363,8 +364,8 @@ class PrepareTest < Test::Unit::TestCase
                      path: "rust/parquet_derive_test/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@snapshot_version}\"",
-                        "+version = \"#{@release_version}\"",
-                        "-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\" }",
+                        "+version = \"#{@release_version}\""],
+                       ["-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\" }",
                         "-parquet_derive = { path = \"../parquet_derive\", version = \"#{@snapshot_version}\" }",
                         "+parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
                         "+parquet_derive = { path = \"../parquet_derive\", version = \"#{@release_version}\" }"],
@@ -408,6 +409,13 @@ class PrepareTest < Test::Unit::TestCase
                      hunks: [
                        ["-set(ARROW_VERSION \"#{@release_version}\")",
                         "+set(ARROW_VERSION \"#{@next_snapshot_version}\")"],
+                     ],
+                   },
+                   {
+                     path: "cpp/vcpkg.json",
+                     hunks: [
+                       ["-  \"version-string\": \"#{@release_version}\",",
+                        "+  \"version-string\": \"#{@next_snapshot_version}\","],
                      ],
                    },
                    {
@@ -610,8 +618,8 @@ class PrepareTest < Test::Unit::TestCase
                      path: "rust/parquet_derive_test/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@release_version}\"",
-                        "+version = \"#{@next_snapshot_version}\"",
-                        "-parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
+                        "+version = \"#{@next_snapshot_version}\""],
+                       ["-parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
                         "-parquet_derive = { path = \"../parquet_derive\", version = \"#{@release_version}\" }",
                         "+parquet = { path = \"../parquet\", version = \"#{@next_snapshot_version}\" }",
                         "+parquet_derive = { path = \"../parquet_derive\", version = \"#{@next_snapshot_version}\" }"],
@@ -636,17 +644,10 @@ class PrepareTest < Test::Unit::TestCase
     expected_changes = [
       {
         sampled_diff: [
-          "-dev/tasks/linux-packages/apache-arrow/debian.ubuntu-xenial/libarrow-glib#{@so_version}.install",
-          "+dev/tasks/linux-packages/apache-arrow/debian.ubuntu-xenial/libarrow-glib#{@next_so_version}.install",
+          "-dev/tasks/linux-packages/apache-arrow/debian/libarrow-glib#{@so_version}.install",
+          "+dev/tasks/linux-packages/apache-arrow/debian/libarrow-glib#{@next_so_version}.install",
         ],
         path: "dev/release/rat_exclude_files.txt"
-      },
-      {
-        sampled_diff: [
-          "-Package: libarrow#{@so_version}",
-          "+Package: libarrow#{@next_so_version}",
-        ],
-        path: "dev/tasks/linux-packages/apache-arrow/debian.ubuntu-xenial/control"
       },
       {
         sampled_diff: [

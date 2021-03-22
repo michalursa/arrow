@@ -18,8 +18,9 @@
 use crate::datatypes::ArrowPrimitiveType;
 
 use super::{
-    Array, BinaryOffsetSizeTrait, BooleanArray, GenericBinaryArray, GenericStringArray,
-    PrimitiveArray, StringOffsetSizeTrait,
+    Array, ArrayRef, BinaryOffsetSizeTrait, BooleanArray, GenericBinaryArray,
+    GenericListArray, GenericStringArray, OffsetSizeTrait, PrimitiveArray,
+    StringOffsetSizeTrait,
 };
 
 /// an iterator that returns Some(T) or None, that can be used on any PrimitiveArray
@@ -45,6 +46,7 @@ impl<'a, T: ArrowPrimitiveType> PrimitiveIter<'a, T> {
 impl<'a, T: ArrowPrimitiveType> std::iter::Iterator for PrimitiveIter<'a, T> {
     type Item = Option<T::Native>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current == self.current_end {
             None
@@ -59,7 +61,10 @@ impl<'a, T: ArrowPrimitiveType> std::iter::Iterator for PrimitiveIter<'a, T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.array.len(), Some(self.array.len()))
+        (
+            self.array.len() - self.current,
+            Some(self.array.len() - self.current),
+        )
     }
 }
 
@@ -118,7 +123,10 @@ impl<'a> std::iter::Iterator for BooleanIter<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.array.len(), Some(self.array.len()))
+        (
+            self.array.len() - self.current,
+            Some(self.array.len() - self.current),
+        )
     }
 }
 
@@ -179,7 +187,7 @@ impl<'a, T: StringOffsetSizeTrait> std::iter::Iterator for GenericStringIter<'a,
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len, Some(self.len))
+        (self.len - self.i, Some(self.len - self.i))
     }
 }
 
@@ -228,7 +236,48 @@ impl<'a, T: BinaryOffsetSizeTrait> std::iter::Iterator for GenericBinaryIter<'a,
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len, Some(self.len))
+        (self.len - self.i, Some(self.len - self.i))
+    }
+}
+
+#[derive(Debug)]
+pub struct GenericListArrayIter<'a, S>
+where
+    S: OffsetSizeTrait,
+{
+    array: &'a GenericListArray<S>,
+    i: usize,
+    len: usize,
+}
+
+impl<'a, S: OffsetSizeTrait> GenericListArrayIter<'a, S> {
+    pub fn new(array: &'a GenericListArray<S>) -> Self {
+        GenericListArrayIter::<S> {
+            array,
+            i: 0,
+            len: array.len(),
+        }
+    }
+}
+
+impl<'a, S: OffsetSizeTrait> std::iter::Iterator for GenericListArrayIter<'a, S> {
+    type Item = Option<ArrayRef>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.i;
+        if i >= self.len {
+            None
+        } else if self.array.is_null(i) {
+            self.i += 1;
+            Some(None)
+        } else {
+            self.i += 1;
+            Some(Some(self.array.value(i)))
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len - self.i, Some(self.len - self.i))
     }
 }
 

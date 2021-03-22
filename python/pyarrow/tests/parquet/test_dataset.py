@@ -206,7 +206,7 @@ def test_filters_equivalency(tempdir, use_legacy_dataset):
     dataset = pq.ParquetDataset(
         base_path, filesystem=fs,
         filters=[('integer', '=', 1), ('string', '!=', 'b'),
-                 ('boolean', '==', True)],
+                 ('boolean', '==', 'True')],
         use_legacy_dataset=use_legacy_dataset,
     )
     table = dataset.read()
@@ -350,6 +350,24 @@ def test_filters_cutoff_exclusive_datetime(tempdir, use_legacy_dataset):
         categories=np.array(date_keys, dtype='datetime64'))
 
     assert result_df['dates'].values == expected
+
+
+@pytest.mark.pandas
+@pytest.mark.dataset
+def test_filters_inclusive_datetime(tempdir):
+    # ARROW-11480
+    path = tempdir / 'timestamps.parquet'
+
+    pd.DataFrame({
+        "dates": pd.date_range("2020-01-01", periods=10, freq="D"),
+        "id": range(10)
+    }).to_parquet(path, use_deprecated_int96_timestamps=True)
+
+    table = pq.read_table(path, filters=[
+        ("dates", "<=", datetime.datetime(2020, 1, 5))
+    ])
+
+    assert table.column('id').to_pylist() == [0, 1, 2, 3, 4]
 
 
 @pytest.mark.pandas
@@ -619,7 +637,7 @@ def test_read_partitioned_directory_s3fs_wrapper(
         pytest.skip("S3FSWrapper no longer working for s3fs 0.5+")
 
     fs, path = s3_example_s3fs
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         wrapper = S3FSWrapper(fs)
     _partition_test_for_filesystem(wrapper, path)
 
@@ -1283,23 +1301,22 @@ def test_write_to_dataset_pathlib(tempdir, use_legacy_dataset):
         tempdir / "test2", use_legacy_dataset)
 
 
-# Those tests are failing - see ARROW-10370
-# @pytest.mark.pandas
-# @pytest.mark.s3
-# @parametrize_legacy_dataset
-# def test_write_to_dataset_pathlib_nonlocal(
-#     tempdir, s3_example_s3fs, use_legacy_dataset
-# ):
-#    # pathlib paths are only accepted for local files
-#    fs, _ = s3_example_s3fs
+@pytest.mark.pandas
+@pytest.mark.s3
+@parametrize_legacy_dataset
+def test_write_to_dataset_pathlib_nonlocal(
+    tempdir, s3_example_s3fs, use_legacy_dataset
+):
+    # pathlib paths are only accepted for local files
+    fs, _ = s3_example_s3fs
 
-#    with pytest.raises(TypeError, match="path-like objects are only allowed"):
-#         _test_write_to_dataset_with_partitions(
-#             tempdir / "test1", use_legacy_dataset, filesystem=fs)
+    with pytest.raises(TypeError, match="path-like objects are only allowed"):
+        _test_write_to_dataset_with_partitions(
+            tempdir / "test1", use_legacy_dataset, filesystem=fs)
 
-#    with pytest.raises(TypeError, match="path-like objects are only allowed"):
-#         _test_write_to_dataset_no_partitions(
-#             tempdir / "test2", use_legacy_dataset, filesystem=fs)
+    with pytest.raises(TypeError, match="path-like objects are only allowed"):
+        _test_write_to_dataset_no_partitions(
+            tempdir / "test2", use_legacy_dataset, filesystem=fs)
 
 
 @pytest.mark.pandas

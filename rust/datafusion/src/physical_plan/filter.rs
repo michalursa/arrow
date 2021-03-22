@@ -63,6 +63,16 @@ impl FilterExec {
             ))),
         }
     }
+
+    /// The expression to filter on. This expression must evaluate to a boolean value.
+    pub fn predicate(&self) -> &Arc<dyn PhysicalExpr> {
+        &self.predicate
+    }
+
+    /// The input plan
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
 }
 
 #[async_trait]
@@ -189,8 +199,13 @@ mod tests {
         let partitions = 4;
         let path = test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
 
-        let csv =
-            CsvExec::try_new(&path, CsvReadOptions::new().schema(&schema), None, 1024)?;
+        let csv = CsvExec::try_new(
+            &path,
+            CsvReadOptions::new().schema(&schema),
+            None,
+            1024,
+            None,
+        )?;
 
         let predicate: Arc<dyn PhysicalExpr> = binary(
             binary(

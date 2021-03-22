@@ -274,6 +274,24 @@ def test_match_substring():
     assert expected.equals(result)
 
 
+def test_trim():
+    # \u3000 is unicode whitespace
+    arr = pa.array([" foo", None, " \u3000foo bar \t"])
+    result = pc.utf8_trim_whitespace(arr)
+    expected = pa.array(["foo", None, "foo bar"])
+    assert expected.equals(result)
+
+    arr = pa.array([" foo", None, " \u3000foo bar \t"])
+    result = pc.ascii_trim_whitespace(arr)
+    expected = pa.array(["foo", None, "\u3000foo bar"])
+    assert expected.equals(result)
+
+    arr = pa.array([" foo", None, " \u3000foo bar \t"])
+    result = pc.utf8_trim(arr, characters=' f\u3000')
+    expected = pa.array(["oo", None, "oo bar \t"])
+    assert expected.equals(result)
+
+
 def test_split_pattern():
     arr = pa.array(["-foo---bar--", "---foo---b"])
     result = pc.split_pattern(arr, pattern="---")
@@ -1109,3 +1127,93 @@ def test_sort_indices_table():
 
     with pytest.raises(ValueError, match="not a valid order"):
         pc.sort_indices(table, sort_keys=[("a", "nonscending")])
+
+
+def test_is_in():
+    arr = pa.array([1, 2, None, 1, 2, 3])
+
+    result = pc.is_in(arr, value_set=pa.array([1, 3, None]))
+    assert result.to_pylist() == [True, False, True, True, False, True]
+
+    result = pc.is_in(arr, value_set=pa.array([1, 3, None]), skip_nulls=True)
+    assert result.to_pylist() == [True, False, False, True, False, True]
+
+    result = pc.is_in(arr, value_set=pa.array([1, 3]))
+    assert result.to_pylist() == [True, False, False, True, False, True]
+
+    result = pc.is_in(arr, value_set=pa.array([1, 3]), skip_nulls=True)
+    assert result.to_pylist() == [True, False, False, True, False, True]
+
+
+def test_index_in():
+    arr = pa.array([1, 2, None, 1, 2, 3])
+
+    result = pc.index_in(arr, value_set=pa.array([1, 3, None]))
+    assert result.to_pylist() == [0, None, 2, 0, None, 1]
+
+    result = pc.index_in(arr, value_set=pa.array([1, 3, None]),
+                         skip_nulls=True)
+    assert result.to_pylist() == [0, None, None, 0, None, 1]
+
+    result = pc.index_in(arr, value_set=pa.array([1, 3]))
+    assert result.to_pylist() == [0, None, None, 0, None, 1]
+
+    result = pc.index_in(arr, value_set=pa.array([1, 3]), skip_nulls=True)
+    assert result.to_pylist() == [0, None, None, 0, None, 1]
+
+
+def test_quantile():
+    arr = pa.array([1, 2, 3, 4])
+
+    result = pc.quantile(arr)
+    assert result.to_pylist() == [2.5]
+
+    result = pc.quantile(arr, interpolation='lower')
+    assert result.to_pylist() == [2]
+    result = pc.quantile(arr, interpolation='higher')
+    assert result.to_pylist() == [3]
+    result = pc.quantile(arr, interpolation='nearest')
+    assert result.to_pylist() == [3]
+    result = pc.quantile(arr, interpolation='midpoint')
+    assert result.to_pylist() == [2.5]
+    result = pc.quantile(arr, interpolation='linear')
+    assert result.to_pylist() == [2.5]
+
+    arr = pa.array([1, 2])
+
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75])
+    assert result.to_pylist() == [1.25, 1.5, 1.75]
+
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75], interpolation='lower')
+    assert result.to_pylist() == [1, 1, 1]
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75], interpolation='higher')
+    assert result.to_pylist() == [2, 2, 2]
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75], interpolation='midpoint')
+    assert result.to_pylist() == [1.5, 1.5, 1.5]
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75], interpolation='nearest')
+    assert result.to_pylist() == [1, 1, 2]
+    result = pc.quantile(arr, q=[0.25, 0.5, 0.75], interpolation='linear')
+    assert result.to_pylist() == [1.25, 1.5, 1.75]
+
+    with pytest.raises(ValueError, match="Quantile must be between 0 and 1"):
+        pc.quantile(arr, q=1.1)
+    with pytest.raises(ValueError, match="'zzz' is not a valid interpolation"):
+        pc.quantile(arr, interpolation='zzz')
+
+
+def test_tdigest():
+    arr = pa.array([1, 2, 3, 4])
+    result = pc.tdigest(arr)
+    assert result.to_pylist() == [2.5]
+
+    arr = pa.chunked_array([pa.array([1, 2]), pa.array([3, 4])])
+    result = pc.tdigest(arr)
+    assert result.to_pylist() == [2.5]
+
+    arr = pa.array([1, 2, 3, 4])
+    result = pc.tdigest(arr, q=[0, 0.5, 1])
+    assert result.to_pylist() == [1, 2.5, 4]
+
+    arr = pa.chunked_array([pa.array([1, 2]), pa.array([3, 4])])
+    result = pc.tdigest(arr, q=[0, 0.5, 1])
+    assert result.to_pylist() == [1, 2.5, 4]

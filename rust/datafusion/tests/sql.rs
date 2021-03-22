@@ -28,7 +28,6 @@ use arrow::{
     util::display::array_value_to_string,
 };
 
-use datafusion::error::Result;
 use datafusion::execution::context::ExecutionContext;
 use datafusion::logical_plan::{LogicalPlan, ToDFSchema};
 use datafusion::prelude::create_udf;
@@ -36,6 +35,7 @@ use datafusion::{
     datasource::{csv::CsvReadOptions, MemTable},
     physical_plan::collect,
 };
+use datafusion::{error::Result, physical_plan::ColumnarValue};
 
 #[tokio::test]
 async fn nyc() -> Result<()> {
@@ -346,6 +346,63 @@ async fn csv_query_group_by_int_min_max() -> Result<()> {
 }
 
 #[tokio::test]
+async fn csv_query_group_by_float32() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_simple_csv(&mut ctx)?;
+
+    let sql =
+        "SELECT COUNT(*) as cnt, c1 FROM aggregate_simple GROUP BY c1 ORDER BY cnt DESC";
+    let actual = execute(&mut ctx, sql).await;
+
+    let expected = vec![
+        vec!["5", "0.00005"],
+        vec!["4", "0.00004"],
+        vec!["3", "0.00003"],
+        vec!["2", "0.00002"],
+        vec!["1", "0.00001"],
+    ];
+    assert_eq!(expected, actual);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_query_group_by_float64() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_simple_csv(&mut ctx)?;
+
+    let sql =
+        "SELECT COUNT(*) as cnt, c2 FROM aggregate_simple GROUP BY c2 ORDER BY cnt DESC";
+    let actual = execute(&mut ctx, sql).await;
+
+    let expected = vec![
+        vec!["5", "0.000000000005"],
+        vec!["4", "0.000000000004"],
+        vec!["3", "0.000000000003"],
+        vec!["2", "0.000000000002"],
+        vec!["1", "0.000000000001"],
+    ];
+    assert_eq!(expected, actual);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_query_group_by_boolean() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_simple_csv(&mut ctx)?;
+
+    let sql =
+        "SELECT COUNT(*) as cnt, c3 FROM aggregate_simple GROUP BY c3 ORDER BY cnt DESC";
+    let actual = execute(&mut ctx, sql).await;
+
+    let expected = vec![vec!["9", "true"], vec!["6", "false"]];
+    assert_eq!(expected, actual);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn csv_query_group_by_two_columns() -> Result<()> {
     let mut ctx = ExecutionContext::new();
     register_aggregate_csv(&mut ctx)?;
@@ -378,6 +435,52 @@ async fn csv_query_group_by_two_columns() -> Result<()> {
         vec!["e", "3", "-95"],
         vec!["e", "4", "-56"],
         vec!["e", "5", "-86"],
+    ];
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_query_group_by_and_having() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_csv(&mut ctx)?;
+    let sql = "SELECT c1, MIN(c3) AS m FROM aggregate_test_100 GROUP BY c1 HAVING m < -100 AND MAX(c3) > 70";
+    let mut actual = execute(&mut ctx, sql).await;
+    actual.sort();
+    let expected = vec![vec!["a", "-101"], vec!["c", "-117"]];
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_query_group_by_and_having_and_where() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_csv(&mut ctx)?;
+    let sql = "SELECT c1, MIN(c3) AS m
+               FROM aggregate_test_100
+               WHERE c1 IN ('a', 'b')
+               GROUP BY c1
+               HAVING m < -100 AND MAX(c3) > 70";
+    let mut actual = execute(&mut ctx, sql).await;
+    actual.sort();
+    let expected = vec![vec!["a", "-101"]];
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_query_having_without_group_by() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_csv(&mut ctx)?;
+    let sql = "SELECT c1, c2, c3 FROM aggregate_test_100 HAVING c2 >= 4 AND c3 > 90";
+    let mut actual = execute(&mut ctx, sql).await;
+    actual.sort();
+    let expected = vec![
+        vec!["c", "4", "123"],
+        vec!["c", "5", "118"],
+        vec!["d", "4", "102"],
+        vec!["e", "4", "96"],
+        vec!["e", "4", "97"],
     ];
     assert_eq!(expected, actual);
     Ok(())
@@ -451,6 +554,7 @@ async fn csv_query_sqrt_sqrt() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn create_ctx() -> Result<ExecutionContext> {
     let mut ctx = ExecutionContext::new();
 
@@ -465,21 +569,19 @@ fn create_ctx() -> Result<ExecutionContext> {
     Ok(ctx)
 }
 
-fn custom_sqrt(args: &[ArrayRef]) -> Result<ArrayRef> {
-    let input = &args[0]
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("cast failed");
+fn custom_sqrt(args: &[ColumnarValue]) -> Result<ColumnarValue> {
+    let arg = &args[0];
+    if let ColumnarValue::Array(v) = arg {
+        let input = v
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("cast failed");
 
-    let mut builder = Float64Builder::new(input.len());
-    for i in 0..input.len() {
-        if input.is_null(i) {
-            builder.append_null()?;
-        } else {
-            builder.append_value(input.value(i).sqrt())?;
-        }
+        let array: Float64Array = input.iter().map(|v| v.map(|x| x.sqrt())).collect();
+        Ok(ColumnarValue::Array(Arc::new(array)))
+    } else {
+        unimplemented!()
     }
-    Ok(Arc::new(builder.finish()))
 }
 
 #[tokio::test]
@@ -653,13 +755,35 @@ async fn csv_query_cast() -> Result<()> {
 async fn csv_query_cast_literal() -> Result<()> {
     let mut ctx = ExecutionContext::new();
     register_aggregate_csv(&mut ctx)?;
-    let sql = "SELECT c12, CAST(1 AS float) FROM aggregate_test_100 WHERE c12 > CAST(0 AS float) LIMIT 2";
+    let sql =
+        "SELECT c12, CAST(1 AS float) FROM aggregate_test_100 WHERE c12 > CAST(0 AS float) LIMIT 2";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![
         vec!["0.9294097332465232", "1"],
         vec!["0.3114712539863804", "1"],
     ];
     assert_eq!(expected, actual);
+    Ok(())
+}
+
+#[tokio::test]
+async fn union_all() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    let sql = "SELECT 1 as x UNION ALL SELECT 2 as x";
+    let actual = execute(&mut ctx, sql).await;
+    let expected = vec![vec!["1"], vec!["2"]];
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_union_all() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_csv(&mut ctx)?;
+    let sql =
+        "SELECT c1 FROM aggregate_test_100 UNION ALL SELECT c1 FROM aggregate_test_100";
+    let actual = execute(&mut ctx, sql).await;
+    assert_eq!(actual.len(), 200);
     Ok(())
 }
 
@@ -1044,7 +1168,7 @@ fn create_case_context() -> Result<ExecutionContext> {
         ]))],
     )?;
     let table = MemTable::try_new(schema, vec![vec![data]])?;
-    ctx.register_table("t1", Box::new(table));
+    ctx.register_table("t1", Arc::new(table));
     Ok(ctx)
 }
 
@@ -1066,8 +1190,7 @@ async fn equijoin() -> Result<()> {
 #[tokio::test]
 async fn left_join() -> Result<()> {
     let mut ctx = create_join_context("t1_id", "t2_id")?;
-    let sql =
-        "SELECT t1_id, t1_name, t2_name FROM t1 LEFT JOIN t2 ON t1_id = t2_id ORDER BY t1_id";
+    let sql = "SELECT t1_id, t1_name, t2_name FROM t1 LEFT JOIN t2 ON t1_id = t2_id ORDER BY t1_id";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![
         vec!["11", "a", "z"],
@@ -1194,7 +1317,7 @@ fn create_join_context(
         ],
     )?;
     let t1_table = MemTable::try_new(t1_schema, vec![vec![t1_data]])?;
-    ctx.register_table("t1", Box::new(t1_table));
+    ctx.register_table("t1", Arc::new(t1_table));
 
     let t2_schema = Arc::new(Schema::new(vec![
         Field::new(column_right, DataType::UInt32, true),
@@ -1213,7 +1336,45 @@ fn create_join_context(
         ],
     )?;
     let t2_table = MemTable::try_new(t2_schema, vec![vec![t2_data]])?;
-    ctx.register_table("t2", Box::new(t2_table));
+    ctx.register_table("t2", Arc::new(t2_table));
+
+    Ok(ctx)
+}
+
+fn create_join_context_qualified() -> Result<ExecutionContext> {
+    let mut ctx = ExecutionContext::new();
+
+    let t1_schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::UInt32, true),
+        Field::new("b", DataType::UInt32, true),
+        Field::new("c", DataType::UInt32, true),
+    ]));
+    let t1_data = RecordBatch::try_new(
+        t1_schema.clone(),
+        vec![
+            Arc::new(UInt32Array::from(vec![1, 2, 3, 4])),
+            Arc::new(UInt32Array::from(vec![10, 20, 30, 40])),
+            Arc::new(UInt32Array::from(vec![50, 60, 70, 80])),
+        ],
+    )?;
+    let t1_table = MemTable::try_new(t1_schema, vec![vec![t1_data]])?;
+    ctx.register_table("t1", Arc::new(t1_table));
+
+    let t2_schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::UInt32, true),
+        Field::new("b", DataType::UInt32, true),
+        Field::new("c", DataType::UInt32, true),
+    ]));
+    let t2_data = RecordBatch::try_new(
+        t2_schema.clone(),
+        vec![
+            Arc::new(UInt32Array::from(vec![1, 2, 9, 4])),
+            Arc::new(UInt32Array::from(vec![100, 200, 300, 400])),
+            Arc::new(UInt32Array::from(vec![500, 600, 700, 800])),
+        ],
+    )?;
+    let t2_table = MemTable::try_new(t2_schema, vec![vec![t2_data]])?;
+    ctx.register_table("t2", Arc::new(t2_table));
 
     Ok(ctx)
 }
@@ -1325,6 +1486,22 @@ fn register_aggregate_csv(ctx: &mut ExecutionContext) -> Result<()> {
     Ok(())
 }
 
+fn register_aggregate_simple_csv(ctx: &mut ExecutionContext) -> Result<()> {
+    // It's not possible to use aggregate_test_100, not enought similar values to test grouping on floats
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("c1", DataType::Float32, false),
+        Field::new("c2", DataType::Float64, false),
+        Field::new("c3", DataType::Boolean, false),
+    ]));
+
+    ctx.register_csv(
+        "aggregate_simple",
+        "tests/aggregate_simple.csv",
+        CsvReadOptions::new().schema(&schema),
+    )?;
+    Ok(())
+}
+
 fn register_alltypes_parquet(ctx: &mut ExecutionContext) {
     let testdata = arrow::util::test_util::parquet_test_data();
     ctx.register_parquet(
@@ -1417,7 +1594,7 @@ async fn generic_query_length<T: 'static + Array + From<Vec<&'static str>>>(
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT length(c1) FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["0"], vec!["1"], vec!["2"], vec!["3"]];
@@ -1426,11 +1603,13 @@ async fn generic_query_length<T: 'static + Array + From<Vec<&'static str>>>(
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "unicode_expressions"), ignore)]
 async fn query_length() -> Result<()> {
     generic_query_length::<StringArray>(DataType::Utf8).await
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "unicode_expressions"), ignore)]
 async fn query_large_length() -> Result<()> {
     generic_query_length::<LargeStringArray>(DataType::LargeUtf8).await
 }
@@ -1451,7 +1630,7 @@ async fn query_not() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT NOT c1 FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["true"], vec!["NULL"], vec!["false"]];
@@ -1477,13 +1656,13 @@ async fn query_concat() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT concat(c1, '-hi-', cast(c2 as varchar)) FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![
         vec!["-hi-0"],
         vec!["a-hi-1"],
-        vec!["NULL"],
+        vec!["aa-hi-"],
         vec!["aaa-hi-3"],
     ];
     assert_eq!(expected, actual);
@@ -1508,7 +1687,7 @@ async fn query_array() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT array(c1, cast(c2 as varchar)) FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![
@@ -1575,7 +1754,7 @@ async fn like() -> Result<()> {
     Ok(())
 }
 
-fn make_timestamp_nano_table() -> Result<Box<MemTable>> {
+fn make_timestamp_nano_table() -> Result<Arc<MemTable>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
         Field::new("value", DataType::Int32, true),
@@ -1595,11 +1774,11 @@ fn make_timestamp_nano_table() -> Result<Box<MemTable>> {
         ],
     )?;
     let table = MemTable::try_new(schema, vec![vec![data]])?;
-    Ok(Box::new(table))
+    Ok(Arc::new(table))
 }
 
 #[tokio::test]
-async fn to_timstamp() -> Result<()> {
+async fn to_timestamp() -> Result<()> {
     let mut ctx = ExecutionContext::new();
     ctx.register_table("ts_data", make_timestamp_nano_table()?);
 
@@ -1627,7 +1806,7 @@ async fn query_is_null() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT c1 IS NULL FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["false"], vec!["true"], vec!["false"]];
@@ -1651,7 +1830,7 @@ async fn query_is_not_null() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT c1 IS NOT NULL FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["true"], vec!["false"], vec!["true"]];
@@ -1678,7 +1857,7 @@ async fn query_count_distinct() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT COUNT(DISTINCT c1) FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["3".to_string()]];
@@ -1707,7 +1886,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     let table = MemTable::try_new(schema, vec![vec![data]])?;
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
 
     // Basic SELECT
     let sql = "SELECT * FROM test";
@@ -1730,7 +1909,7 @@ async fn query_on_string_dictionary() -> Result<()> {
     // Expression evaluation
     let sql = "SELECT concat(d1, '-foo') FROM test";
     let actual = execute(&mut ctx, sql).await;
-    let expected = vec![vec!["one-foo"], vec!["NULL"], vec!["three-foo"]];
+    let expected = vec![vec!["one-foo"], vec!["-foo"], vec!["three-foo"]];
     assert_eq!(expected, actual);
 
     // aggregation
@@ -1778,7 +1957,7 @@ async fn query_scalar_minus_array() -> Result<()> {
     let table = MemTable::try_new(schema, vec![vec![data]])?;
 
     let mut ctx = ExecutionContext::new();
-    ctx.register_table("test", Box::new(table));
+    ctx.register_table("test", Arc::new(table));
     let sql = "SELECT 4 - c1 FROM test";
     let actual = execute(&mut ctx, sql).await;
     let expected = vec![vec!["4"], vec!["3"], vec!["NULL"], vec!["1"]];
@@ -1828,28 +2007,500 @@ async fn csv_between_expr_negated() -> Result<()> {
 }
 
 #[tokio::test]
-async fn string_expressions() -> Result<()> {
+async fn csv_group_by_date() -> Result<()> {
     let mut ctx = ExecutionContext::new();
-    let sql = "SELECT
-        char_length('tom') AS char_length
-        ,char_length(NULL) AS char_length_null
-        ,character_length('tom') AS character_length
-        ,character_length(NULL) AS character_length_null
-        ,lower('TOM') AS lower
-        ,lower(NULL) AS lower_null
-        ,upper('tom') AS upper
-        ,upper(NULL) AS upper_null
-        ,trim(' tom ') AS trim
-        ,trim(NULL) AS trim_null
-        ,ltrim(' tom ') AS trim_left
-        ,rtrim(' tom ') AS trim_right
-    ";
-    let actual = execute(&mut ctx, sql).await;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("date", DataType::Date32, false),
+        Field::new("cnt", DataType::Int32, false),
+    ]));
+    let data = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Date32Array::from(vec![
+                Some(100),
+                Some(100),
+                Some(100),
+                Some(101),
+                Some(101),
+                Some(101),
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(3),
+                Some(3),
+                Some(3),
+            ])),
+        ],
+    )?;
+    let table = MemTable::try_new(schema, vec![vec![data]])?;
 
-    let expected = vec![vec![
-        "3", "NULL", "3", "NULL", "tom", "NULL", "TOM", "NULL", "tom", "NULL", "tom ",
-        " tom",
-    ]];
+    ctx.register_table("dates", Arc::new(table));
+    let sql = "SELECT SUM(cnt) FROM dates GROUP BY date";
+    let actual = execute(&mut ctx, sql).await;
+    let mut actual: Vec<String> = actual.iter().flatten().cloned().collect();
+    actual.sort();
+    let expected = vec!["6", "9"];
     assert_eq!(expected, actual);
+    Ok(())
+}
+
+macro_rules! test_expression {
+    ($SQL:expr, $EXPECTED:expr) => {
+        let mut ctx = ExecutionContext::new();
+        let sql = format!("SELECT {}", $SQL);
+        let actual = execute(&mut ctx, sql.as_str()).await;
+        assert_eq!($EXPECTED, actual[0][0]);
+    };
+}
+
+#[tokio::test]
+async fn test_boolean_expressions() -> Result<()> {
+    test_expression!("true", "true");
+    test_expression!("false", "false");
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "crypto_expressions"), ignore)]
+async fn test_crypto_expressions() -> Result<()> {
+    test_expression!("md5('tom')", "34b7da764b21d298ef307d04d8152dc5");
+    test_expression!("md5('')", "d41d8cd98f00b204e9800998ecf8427e");
+    test_expression!("md5(NULL)", "NULL");
+    test_expression!(
+        "sha224('tom')",
+        "0bf6cb62649c42a9ae3876ab6f6d92ad36cb5414e495f8873292be4d"
+    );
+    test_expression!(
+        "sha224('')",
+        "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"
+    );
+    test_expression!("sha224(NULL)", "NULL");
+    test_expression!(
+        "sha256('tom')",
+        "e1608f75c5d7813f3d4031cb30bfb786507d98137538ff8e128a6ff74e84e643"
+    );
+    test_expression!(
+        "sha256('')",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    test_expression!("sha256(NULL)", "NULL");
+    test_expression!("sha384('tom')", "096f5b68aa77848e4fdf5c1c0b350de2dbfad60ffd7c25d9ea07c6c19b8a4d55a9187eb117c557883f58c16dfac3e343");
+    test_expression!("sha384('')", "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b");
+    test_expression!("sha384(NULL)", "NULL");
+    test_expression!("sha512('tom')", "6e1b9b3fe840680e37051f7ad5e959d6f39ad0f8885d855166f55c659469d3c8b78118c44a2a49c72ddb481cd6d8731034e11cc030070ba843a90b3495cb8d3e");
+    test_expression!("sha512('')", "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+    test_expression!("sha512(NULL)", "NULL");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_interval_expressions() -> Result<()> {
+    test_expression!(
+        "interval '1'",
+        "0 years 0 mons 0 days 0 hours 0 mins 1.00 secs"
+    );
+    test_expression!(
+        "interval '1 second'",
+        "0 years 0 mons 0 days 0 hours 0 mins 1.00 secs"
+    );
+    test_expression!(
+        "interval '500 milliseconds'",
+        "0 years 0 mons 0 days 0 hours 0 mins 0.500 secs"
+    );
+    test_expression!(
+        "interval '5 second'",
+        "0 years 0 mons 0 days 0 hours 0 mins 5.00 secs"
+    );
+    test_expression!(
+        "interval '0.5 minute'",
+        "0 years 0 mons 0 days 0 hours 0 mins 30.00 secs"
+    );
+    test_expression!(
+        "interval '.5 minute'",
+        "0 years 0 mons 0 days 0 hours 0 mins 30.00 secs"
+    );
+    test_expression!(
+        "interval '5 minute'",
+        "0 years 0 mons 0 days 0 hours 5 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '5 minute 1 second'",
+        "0 years 0 mons 0 days 0 hours 5 mins 1.00 secs"
+    );
+    test_expression!(
+        "interval '1 hour'",
+        "0 years 0 mons 0 days 1 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '5 hour'",
+        "0 years 0 mons 0 days 5 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '1 day'",
+        "0 years 0 mons 1 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '1 day 1'",
+        "0 years 0 mons 1 days 0 hours 0 mins 1.00 secs"
+    );
+    test_expression!(
+        "interval '0.5'",
+        "0 years 0 mons 0 days 0 hours 0 mins 0.500 secs"
+    );
+    test_expression!(
+        "interval '0.5 day 1'",
+        "0 years 0 mons 0 days 12 hours 0 mins 1.00 secs"
+    );
+    test_expression!(
+        "interval '0.49 day'",
+        "0 years 0 mons 0 days 11 hours 45 mins 36.00 secs"
+    );
+    test_expression!(
+        "interval '0.499 day'",
+        "0 years 0 mons 0 days 11 hours 58 mins 33.596 secs"
+    );
+    test_expression!(
+        "interval '0.4999 day'",
+        "0 years 0 mons 0 days 11 hours 59 mins 51.364 secs"
+    );
+    test_expression!(
+        "interval '0.49999 day'",
+        "0 years 0 mons 0 days 11 hours 59 mins 59.136 secs"
+    );
+    test_expression!(
+        "interval '0.49999999999 day'",
+        "0 years 0 mons 0 days 12 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '5 day'",
+        "0 years 0 mons 5 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '5 day 4 hours 3 minutes 2 seconds 100 milliseconds'",
+        "0 years 0 mons 5 days 4 hours 3 mins 2.100 secs"
+    );
+    test_expression!(
+        "interval '0.5 month'",
+        "0 years 0 mons 15 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '1 month'",
+        "0 years 1 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '5 month'",
+        "0 years 5 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '13 month'",
+        "1 years 1 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '0.5 year'",
+        "0 years 6 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '1 year'",
+        "1 years 0 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    test_expression!(
+        "interval '2 year'",
+        "2 years 0 mons 0 days 0 hours 0 mins 0.00 secs"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_string_expressions() -> Result<()> {
+    test_expression!("ascii('')", "0");
+    test_expression!("ascii('x')", "120");
+    test_expression!("ascii(NULL)", "NULL");
+    test_expression!("bit_length('')", "0");
+    test_expression!("bit_length('chars')", "40");
+    test_expression!("bit_length('josé')", "40");
+    test_expression!("bit_length(NULL)", "NULL");
+    test_expression!("btrim(' xyxtrimyyx ', NULL)", "NULL");
+    test_expression!("btrim(' xyxtrimyyx ')", "xyxtrimyyx");
+    test_expression!("btrim('\n xyxtrimyyx \n')", "\n xyxtrimyyx \n");
+    test_expression!("btrim('xyxtrimyyx', 'xyz')", "trim");
+    test_expression!("btrim('\nxyxtrimyyx\n', 'xyz\n')", "trim");
+    test_expression!("btrim(NULL, 'xyz')", "NULL");
+    test_expression!("chr(CAST(120 AS int))", "x");
+    test_expression!("chr(CAST(128175 AS int))", "💯");
+    test_expression!("chr(CAST(NULL AS int))", "NULL");
+    test_expression!("concat('a','b','c')", "abc");
+    test_expression!("concat('abcde', 2, NULL, 22)", "abcde222");
+    test_expression!("concat(NULL)", "");
+    test_expression!("concat_ws(',', 'abcde', 2, NULL, 22)", "abcde,2,22");
+    test_expression!("concat_ws('|','a','b','c')", "a|b|c");
+    test_expression!("concat_ws('|',NULL)", "");
+    test_expression!("concat_ws(NULL,'a',NULL,'b','c')", "NULL");
+    test_expression!("initcap('')", "");
+    test_expression!("initcap('hi THOMAS')", "Hi Thomas");
+    test_expression!("initcap(NULL)", "NULL");
+    test_expression!("lower('')", "");
+    test_expression!("lower('TOM')", "tom");
+    test_expression!("lower(NULL)", "NULL");
+    test_expression!("ltrim(' zzzytest ', NULL)", "NULL");
+    test_expression!("ltrim(' zzzytest ')", "zzzytest ");
+    test_expression!("ltrim('zzzytest', 'xyz')", "test");
+    test_expression!("ltrim(NULL, 'xyz')", "NULL");
+    test_expression!("octet_length('')", "0");
+    test_expression!("octet_length('chars')", "5");
+    test_expression!("octet_length('josé')", "5");
+    test_expression!("octet_length(NULL)", "NULL");
+    test_expression!("repeat('Pg', 4)", "PgPgPgPg");
+    test_expression!("repeat('Pg', CAST(NULL AS INT))", "NULL");
+    test_expression!("repeat(NULL, 4)", "NULL");
+    test_expression!("replace('abcdefabcdef', 'cd', 'XX')", "abXXefabXXef");
+    test_expression!("replace('abcdefabcdef', 'cd', NULL)", "NULL");
+    test_expression!("replace('abcdefabcdef', 'notmatch', 'XX')", "abcdefabcdef");
+    test_expression!("replace('abcdefabcdef', NULL, 'XX')", "NULL");
+    test_expression!("replace(NULL, 'cd', 'XX')", "NULL");
+    test_expression!("rtrim(' testxxzx ')", " testxxzx");
+    test_expression!("rtrim(' zzzytest ', NULL)", "NULL");
+    test_expression!("rtrim('testxxzx', 'xyz')", "test");
+    test_expression!("rtrim(NULL, 'xyz')", "NULL");
+    test_expression!("split_part('abc~@~def~@~ghi', '~@~', 2)", "def");
+    test_expression!("split_part('abc~@~def~@~ghi', '~@~', 20)", "");
+    test_expression!("split_part(NULL, '~@~', 20)", "NULL");
+    test_expression!("split_part('abc~@~def~@~ghi', NULL, 20)", "NULL");
+    test_expression!(
+        "split_part('abc~@~def~@~ghi', '~@~', CAST(NULL AS INT))",
+        "NULL"
+    );
+    test_expression!("starts_with('alphabet', 'alph')", "true");
+    test_expression!("starts_with('alphabet', 'blph')", "false");
+    test_expression!("starts_with(NULL, 'blph')", "NULL");
+    test_expression!("starts_with('alphabet', NULL)", "NULL");
+    test_expression!("to_hex(2147483647)", "7fffffff");
+    test_expression!("to_hex(9223372036854775807)", "7fffffffffffffff");
+    test_expression!("to_hex(CAST(NULL AS int))", "NULL");
+    test_expression!("trim(' tom ')", "tom");
+    test_expression!("trim(' tom')", "tom");
+    test_expression!("trim('')", "");
+    test_expression!("trim('tom ')", "tom");
+    test_expression!("upper('')", "");
+    test_expression!("upper('tom')", "TOM");
+    test_expression!("upper(NULL)", "NULL");
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "unicode_expressions"), ignore)]
+async fn test_unicode_expressions() -> Result<()> {
+    test_expression!("char_length('')", "0");
+    test_expression!("char_length('chars')", "5");
+    test_expression!("char_length('josé')", "4");
+    test_expression!("char_length(NULL)", "NULL");
+    test_expression!("character_length('')", "0");
+    test_expression!("character_length('chars')", "5");
+    test_expression!("character_length('josé')", "4");
+    test_expression!("character_length(NULL)", "NULL");
+    test_expression!("left('abcde', -2)", "abc");
+    test_expression!("left('abcde', -200)", "");
+    test_expression!("left('abcde', 0)", "");
+    test_expression!("left('abcde', 2)", "ab");
+    test_expression!("left('abcde', 200)", "abcde");
+    test_expression!("left('abcde', CAST(NULL AS INT))", "NULL");
+    test_expression!("left(NULL, 2)", "NULL");
+    test_expression!("left(NULL, CAST(NULL AS INT))", "NULL");
+    test_expression!("length('')", "0");
+    test_expression!("length('chars')", "5");
+    test_expression!("length('josé')", "4");
+    test_expression!("length(NULL)", "NULL");
+    test_expression!("lpad('hi', 5, 'xy')", "xyxhi");
+    test_expression!("lpad('hi', 0)", "");
+    test_expression!("lpad('hi', 21, 'abcdef')", "abcdefabcdefabcdefahi");
+    test_expression!("lpad('hi', 5, 'xy')", "xyxhi");
+    test_expression!("lpad('hi', 5, NULL)", "NULL");
+    test_expression!("lpad('hi', 5)", "   hi");
+    test_expression!("lpad('hi', CAST(NULL AS INT), 'xy')", "NULL");
+    test_expression!("lpad('hi', CAST(NULL AS INT))", "NULL");
+    test_expression!("lpad('xyxhi', 3)", "xyx");
+    test_expression!("lpad(NULL, 0)", "NULL");
+    test_expression!("lpad(NULL, 5, 'xy')", "NULL");
+    test_expression!("reverse('abcde')", "edcba");
+    test_expression!("reverse('loẅks')", "skẅol");
+    test_expression!("reverse(NULL)", "NULL");
+    test_expression!("right('abcde', -2)", "cde");
+    test_expression!("right('abcde', -200)", "");
+    test_expression!("right('abcde', 0)", "");
+    test_expression!("right('abcde', 2)", "de");
+    test_expression!("right('abcde', 200)", "abcde");
+    test_expression!("right('abcde', CAST(NULL AS INT))", "NULL");
+    test_expression!("right(NULL, 2)", "NULL");
+    test_expression!("right(NULL, CAST(NULL AS INT))", "NULL");
+    test_expression!("rpad('hi', 5, 'xy')", "hixyx");
+    test_expression!("rpad('hi', 0)", "");
+    test_expression!("rpad('hi', 21, 'abcdef')", "hiabcdefabcdefabcdefa");
+    test_expression!("rpad('hi', 5, 'xy')", "hixyx");
+    test_expression!("rpad('hi', 5, NULL)", "NULL");
+    test_expression!("rpad('hi', 5)", "hi   ");
+    test_expression!("rpad('hi', CAST(NULL AS INT), 'xy')", "NULL");
+    test_expression!("rpad('hi', CAST(NULL AS INT))", "NULL");
+    test_expression!("rpad('xyxhi', 3)", "xyx");
+    test_expression!("strpos('abc', 'c')", "3");
+    test_expression!("strpos('josé', 'é')", "4");
+    test_expression!("strpos('joséésoj', 'so')", "6");
+    test_expression!("strpos('joséésoj', 'abc')", "0");
+    test_expression!("strpos(NULL, 'abc')", "NULL");
+    test_expression!("strpos('joséésoj', NULL)", "NULL");
+    test_expression!("substr('alphabet', -3)", "alphabet");
+    test_expression!("substr('alphabet', 0)", "alphabet");
+    test_expression!("substr('alphabet', 1)", "alphabet");
+    test_expression!("substr('alphabet', 2)", "lphabet");
+    test_expression!("substr('alphabet', 3)", "phabet");
+    test_expression!("substr('alphabet', 30)", "");
+    test_expression!("substr('alphabet', CAST(NULL AS int))", "NULL");
+    test_expression!("substr('alphabet', 3, 2)", "ph");
+    test_expression!("substr('alphabet', 3, 20)", "phabet");
+    test_expression!("substr('alphabet', CAST(NULL AS int), 20)", "NULL");
+    test_expression!("substr('alphabet', 3, CAST(NULL AS int))", "NULL");
+    test_expression!("translate('12345', '143', 'ax')", "a2x5");
+    test_expression!("translate(NULL, '143', 'ax')", "NULL");
+    test_expression!("translate('12345', NULL, 'ax')", "NULL");
+    test_expression!("translate('12345', '143', NULL)", "NULL");
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "regex_expressions"), ignore)]
+async fn test_regex_expressions() -> Result<()> {
+    test_expression!("regexp_replace('ABCabcABC', '(abc)', 'X', 'gi')", "XXX");
+    test_expression!("regexp_replace('ABCabcABC', '(abc)', 'X', 'i')", "XabcABC");
+    test_expression!("regexp_replace('foobarbaz', 'b..', 'X', 'g')", "fooXX");
+    test_expression!("regexp_replace('foobarbaz', 'b..', 'X')", "fooXbaz");
+    test_expression!(
+        "regexp_replace('foobarbaz', 'b(..)', 'X\\1Y', 'g')",
+        "fooXarYXazY"
+    );
+    test_expression!(
+        "regexp_replace('foobarbaz', 'b(..)', 'X\\1Y', NULL)",
+        "NULL"
+    );
+    test_expression!("regexp_replace('foobarbaz', 'b(..)', NULL, 'g')", "NULL");
+    test_expression!("regexp_replace('foobarbaz', NULL, 'X\\1Y', 'g')", "NULL");
+    test_expression!("regexp_replace('Thomas', '.[mN]a.', 'M')", "ThM");
+    test_expression!("regexp_replace(NULL, 'b(..)', 'X\\1Y', 'g')", "NULL");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_extract_date_part() -> Result<()> {
+    test_expression!("date_part('hour', CAST('2020-01-01' AS DATE))", "0");
+    test_expression!("EXTRACT(HOUR FROM CAST('2020-01-01' AS DATE))", "0");
+    test_expression!(
+        "EXTRACT(HOUR FROM to_timestamp('2020-09-08T12:00:00+00:00'))",
+        "12"
+    );
+    test_expression!("date_part('YEAR', CAST('2000-01-01' AS DATE))", "2000");
+    test_expression!(
+        "EXTRACT(year FROM to_timestamp('2020-09-08T12:00:00+00:00'))",
+        "2020"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_in_list_scalar() -> Result<()> {
+    test_expression!("'a' IN ('a','b')", "true");
+    test_expression!("'c' IN ('a','b')", "false");
+    test_expression!("'c' NOT IN ('a','b')", "true");
+    test_expression!("'a' NOT IN ('a','b')", "false");
+    test_expression!("NULL IN ('a','b')", "NULL");
+    test_expression!("NULL NOT IN ('a','b')", "NULL");
+    test_expression!("'a' IN ('a','b',NULL)", "true");
+    test_expression!("'c' IN ('a','b',NULL)", "NULL");
+    test_expression!("'a' NOT IN ('a','b',NULL)", "false");
+    test_expression!("'c' NOT IN ('a','b',NULL)", "NULL");
+    test_expression!("0 IN (0,1,2)", "true");
+    test_expression!("3 IN (0,1,2)", "false");
+    test_expression!("3 NOT IN (0,1,2)", "true");
+    test_expression!("0 NOT IN (0,1,2)", "false");
+    test_expression!("NULL IN (0,1,2)", "NULL");
+    test_expression!("NULL NOT IN (0,1,2)", "NULL");
+    test_expression!("0 IN (0,1,2,NULL)", "true");
+    test_expression!("3 IN (0,1,2,NULL)", "NULL");
+    test_expression!("0 NOT IN (0,1,2,NULL)", "false");
+    test_expression!("3 NOT IN (0,1,2,NULL)", "NULL");
+    test_expression!("0.0 IN (0.0,0.1,0.2)", "true");
+    test_expression!("0.3 IN (0.0,0.1,0.2)", "false");
+    test_expression!("0.3 NOT IN (0.0,0.1,0.2)", "true");
+    test_expression!("0.0 NOT IN (0.0,0.1,0.2)", "false");
+    test_expression!("NULL IN (0.0,0.1,0.2)", "NULL");
+    test_expression!("NULL NOT IN (0.0,0.1,0.2)", "NULL");
+    test_expression!("0.0 IN (0.0,0.1,0.2,NULL)", "true");
+    test_expression!("0.3 IN (0.0,0.1,0.2,NULL)", "NULL");
+    test_expression!("0.0 NOT IN (0.0,0.1,0.2,NULL)", "false");
+    test_expression!("0.3 NOT IN (0.0,0.1,0.2,NULL)", "NULL");
+    test_expression!("'1' IN ('a','b',1)", "true");
+    test_expression!("'2' IN ('a','b',1)", "false");
+    test_expression!("'2' NOT IN ('a','b',1)", "true");
+    test_expression!("'1' NOT IN ('a','b',1)", "false");
+    test_expression!("NULL IN ('a','b',1)", "NULL");
+    test_expression!("NULL NOT IN ('a','b',1)", "NULL");
+    test_expression!("'1' IN ('a','b',NULL,1)", "true");
+    test_expression!("'2' IN ('a','b',NULL,1)", "NULL");
+    test_expression!("'1' NOT IN ('a','b',NULL,1)", "false");
+    test_expression!("'2' NOT IN ('a','b',NULL,1)", "NULL");
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_list_array() -> Result<()> {
+    let mut ctx = ExecutionContext::new();
+    register_aggregate_csv_by_sql(&mut ctx).await;
+    let sql = "SELECT
+            c1 IN ('a', 'c') AS utf8_in_true
+            ,c1 IN ('x', 'y') AS utf8_in_false
+            ,c1 NOT IN ('x', 'y') AS utf8_not_in_true
+            ,c1 NOT IN ('a', 'c') AS utf8_not_in_false
+            ,CAST(CAST(c1 AS int) AS varchar) IN ('a', 'c') AS utf8_in_null
+        FROM aggregate_test_100 WHERE c12 < 0.05";
+    let actual = execute(&mut ctx, sql).await;
+    let expected = vec![
+        vec!["true", "false", "true", "false", "NULL"],
+        vec!["true", "false", "true", "false", "NULL"],
+        vec!["true", "false", "true", "false", "NULL"],
+        vec!["false", "false", "true", "true", "NULL"],
+        vec!["false", "false", "true", "true", "NULL"],
+        vec!["false", "false", "true", "true", "NULL"],
+        vec!["false", "false", "true", "true", "NULL"],
+    ];
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
+// TODO Tests to prove correct implementation of INNER JOIN's with qualified names.
+//  https://issues.apache.org/jira/projects/ARROW/issues/ARROW-11432.
+#[tokio::test]
+#[ignore]
+async fn inner_join_qualified_names() -> Result<()> {
+    // Setup the statements that test qualified names function correctly.
+    let equivalent_sql = [
+        "SELECT t1.a, t1.b, t1.c, t2.a, t2.b, t2.c
+            FROM t1
+            INNER JOIN t2 ON t1.a = t2.a
+            ORDER BY t1.a",
+        "SELECT t1.a, t1.b, t1.c, t2.a, t2.b, t2.c
+            FROM t1
+            INNER JOIN t2 ON t2.a = t1.a
+            ORDER BY t1.a",
+    ];
+
+    let expected = vec![
+        vec!["1", "10", "50", "1", "100", "500"],
+        vec!["2", "20", "60", "2", "20", "600"],
+        vec!["4", "40", "80", "4", "400", "800"],
+    ];
+
+    for sql in equivalent_sql.iter() {
+        let mut ctx = create_join_context_qualified()?;
+        let actual = execute(&mut ctx, sql).await;
+        assert_eq!(expected, actual);
+    }
     Ok(())
 }

@@ -140,13 +140,31 @@ class ASCIIValidationTest : public UTF8Test {};
   }
 }
 
+template <typename ValidationFunc>
+void ValidateWithPrefixes(ValidationFunc&& validate, const std::string& s) {
+  // Exercise SIMD optimizations
+  for (int prefix_size = 1; prefix_size < 64; ++prefix_size) {
+    std::string longer(prefix_size, 'x');
+    longer.append(s);
+    ASSERT_TRUE(validate(longer));
+    longer.append(prefix_size, 'y');
+    ASSERT_TRUE(validate(longer));
+  }
+}
+
 void AssertValidUTF8(const std::string& s) { ASSERT_TRUE(IsValidUTF8(s)); }
 
 void AssertInvalidUTF8(const std::string& s) { ASSERT_TRUE(IsInvalidUTF8(s)); }
 
-void AssertValidASCII(const std::string& s) { ASSERT_TRUE(IsValidASCII(s)); }
+void AssertValidASCII(const std::string& s) {
+  ASSERT_TRUE(IsValidASCII(s));
+  ValidateWithPrefixes(IsValidASCII, s);
+}
 
-void AssertInvalidASCII(const std::string& s) { ASSERT_TRUE(IsInvalidASCII(s)); }
+void AssertInvalidASCII(const std::string& s) {
+  ASSERT_TRUE(IsInvalidASCII(s));
+  ValidateWithPrefixes(IsInvalidASCII, s);
+}
 
 TEST_F(ASCIIValidationTest, AsciiValid) {
   for (const auto& s : valid_sequences_ascii) {
@@ -410,6 +428,64 @@ TEST(UTF8DecodeReverse, Basics) {
   CheckInvalid("\xC0");
   CheckInvalid("\xE0\x80");
   CheckInvalid("\xF0\x80\x80");
+}
+
+TEST(UTF8FindIf, Basics) {
+  auto CheckOk = [](const std::string& s, unsigned char test, int64_t offset_left,
+                    int64_t offset_right) -> void {
+    const uint8_t* begin = reinterpret_cast<const uint8_t*>(s.c_str());
+    const uint8_t* end = begin + s.length();
+    std::reverse_iterator<const uint8_t*> rbegin(end);
+    std::reverse_iterator<const uint8_t*> rend(begin);
+    const uint8_t* left;
+    const uint8_t* right;
+    auto predicate = [&](uint32_t c) { return c == test; };
+    EXPECT_TRUE(UTF8FindIf(begin, end, predicate, &left));
+    EXPECT_TRUE(UTF8FindIfReverse(begin, end, predicate, &right));
+    EXPECT_EQ(offset_left, left - begin);
+    EXPECT_EQ(offset_right, right - begin);
+    EXPECT_EQ(std::find_if(begin, end, predicate) - begin, left - begin);
+    EXPECT_EQ(std::find_if(rbegin, rend, predicate).base() - begin, right - begin);
+  };
+  auto CheckOkUTF8 = [](const std::string& s, uint32_t test, int64_t offset_left,
+                        int64_t offset_right) -> void {
+    const uint8_t* begin = reinterpret_cast<const uint8_t*>(s.c_str());
+    const uint8_t* end = begin + s.length();
+    std::reverse_iterator<const uint8_t*> rbegin(end);
+    std::reverse_iterator<const uint8_t*> rend(begin);
+    const uint8_t* left;
+    const uint8_t* right;
+    auto predicate = [&](uint32_t c) { return c == test; };
+    EXPECT_TRUE(UTF8FindIf(begin, end, predicate, &left));
+    EXPECT_TRUE(UTF8FindIfReverse(begin, end, predicate, &right));
+    EXPECT_EQ(offset_left, left - begin);
+    EXPECT_EQ(offset_right, right - begin);
+    // we cannot check the unicode version with find_if semantics, because it's byte based
+    // EXPECT_EQ(std::find_if(begin, end, predicate) - begin, left - begin);
+    // EXPECT_EQ(std::find_if(rbegin, rend, predicate).base() - begin, right - begin);
+  };
+
+  CheckOk("aaaba", 'a', 0, 5);
+  CheckOkUTF8("aaaβa", 'a', 0, 6);
+
+  CheckOk("aaaba", 'b', 3, 4);
+  CheckOkUTF8("aaaβa", U'β', 3, 5);
+
+  CheckOk("aaababa", 'b', 3, 6);
+  CheckOkUTF8("aaaβaβa", U'β', 3, 8);
+
+  CheckOk("aaababa", 'c', 7, 0);
+  CheckOk("aaaβaβa", 'c', 9, 0);
+  CheckOkUTF8("aaaβaβa", U'ɑ', 9, 0);
+
+  CheckOk("a", 'a', 0, 1);
+  CheckOkUTF8("ɑ", U'ɑ', 0, 2);
+
+  CheckOk("a", 'b', 1, 0);
+  CheckOkUTF8("ɑ", 'b', 2, 0);
+
+  CheckOk("", 'b', 0, 0);
+  CheckOkUTF8("", U'β', 0, 0);
 }
 
 }  // namespace util

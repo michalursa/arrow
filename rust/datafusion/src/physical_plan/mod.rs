@@ -44,7 +44,7 @@ pub trait RecordBatchStream: Stream<Item = ArrowResult<RecordBatch>> {
 }
 
 /// Trait for a stream of record batches.
-pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
+pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send + Sync>>;
 
 /// Physical query planner that converts a `LogicalPlan` to an
 /// `ExecutionPlan` suitable for execution.
@@ -131,7 +131,7 @@ pub enum Partitioning {
     RoundRobinBatch(usize),
     /// Allocate rows based on a hash of one of more expressions and the specified
     /// number of partitions
-    /// This partitioning scheme is not yet fully supported. See https://issues.apache.org/jira/browse/ARROW-11011
+    /// This partitioning scheme is not yet fully supported. See [ARROW-11011](https://issues.apache.org/jira/browse/ARROW-11011)
     Hash(Vec<Arc<dyn PhysicalExpr>>, usize),
     /// Unknown partitioning scheme with a known number of partitions
     UnknownPartitioning(usize),
@@ -159,6 +159,7 @@ pub enum Distribution {
 }
 
 /// Represents the result from an expression
+#[derive(Clone)]
 pub enum ColumnarValue {
     /// Array of values
     Array(ArrayRef),
@@ -185,6 +186,9 @@ impl ColumnarValue {
 /// Expression that can be evaluated against a RecordBatch
 /// A Physical expression knows its type, nullability and how to evaluate itself.
 pub trait PhysicalExpr: Send + Sync + Display + Debug {
+    /// Returns the physical expression as [`Any`](std::any::Any) so that it can be
+    /// downcast to a specific implementation.
+    fn as_any(&self) -> &dyn Any;
     /// Get the data type of this expression, given the schema of the input
     fn data_type(&self, input_schema: &Schema) -> Result<DataType>;
     /// Determine whether this expression is nullable, given the schema of the input
@@ -199,6 +203,9 @@ pub trait PhysicalExpr: Send + Sync + Display + Debug {
 /// * knows its accumulator's state's field
 /// * knows the expressions from whose its accumulator will receive values
 pub trait AggregateExpr: Send + Sync + Debug {
+    /// Returns the aggregate expression as [`Any`](std::any::Any) so that it can be
+    /// downcast to a specific implementation.
+    fn as_any(&self) -> &dyn Any;
     /// the field of the final result of this aggregation.
     fn field(&self) -> Result<Field>;
 
@@ -229,10 +236,10 @@ pub trait Accumulator: Send + Sync + Debug {
     fn state(&self) -> Result<Vec<ScalarValue>>;
 
     /// updates the accumulator's state from a vector of scalars.
-    fn update(&mut self, values: &Vec<ScalarValue>) -> Result<()>;
+    fn update(&mut self, values: &[ScalarValue]) -> Result<()>;
 
     /// updates the accumulator's state from a vector of arrays.
-    fn update_batch(&mut self, values: &Vec<ArrayRef>) -> Result<()> {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         };
@@ -246,10 +253,10 @@ pub trait Accumulator: Send + Sync + Debug {
     }
 
     /// updates the accumulator's state from a vector of scalars.
-    fn merge(&mut self, states: &Vec<ScalarValue>) -> Result<()>;
+    fn merge(&mut self, states: &[ScalarValue]) -> Result<()>;
 
     /// updates the accumulator's state from a vector of states.
-    fn merge_batch(&mut self, states: &Vec<ArrayRef>) -> Result<()> {
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
         };
@@ -270,6 +277,8 @@ pub mod aggregates;
 pub mod array_expressions;
 pub mod coalesce_batches;
 pub mod common;
+#[cfg(feature = "crypto_expressions")]
+pub mod crypto_expressions;
 pub mod csv;
 pub mod datetime_expressions;
 pub mod distinct_expressions;
@@ -289,9 +298,14 @@ pub mod merge;
 pub mod parquet;
 pub mod planner;
 pub mod projection;
+#[cfg(feature = "regex_expressions")]
+pub mod regex_expressions;
 pub mod repartition;
 pub mod sort;
 pub mod string_expressions;
 pub mod type_coercion;
 pub mod udaf;
 pub mod udf;
+#[cfg(feature = "unicode_expressions")]
+pub mod unicode_expressions;
+pub mod union;

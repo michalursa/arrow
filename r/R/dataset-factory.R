@@ -27,6 +27,7 @@ DatasetFactory <- R6Class("DatasetFactory", inherit = ArrowObject,
       if (is.null(schema)) {
         dataset___DatasetFactory__Finish1(self, unify_schemas)
       } else {
+        assert_is(schema, "Schema")
         dataset___DatasetFactory__Finish2(self, schema)
       }
     },
@@ -107,7 +108,9 @@ DatasetFactory$create <- function(x,
 #' @param ... Additional format-specific options, passed to
 #' `FileFormat$create()`. For CSV options, note that you can specify them either
 #' with the Arrow C++ library naming ("delimiter", "quoting", etc.) or the
-#' `readr`-style naming used in [read_csv_arrow()] ("delim", "quote", etc.)
+#' `readr`-style naming used in [read_csv_arrow()] ("delim", "quote", etc.).
+#' Not all `readr` options are currently supported; please file an issue if you
+#' encounter one that `arrow` should support.
 #' @return A `DatasetFactory` object. Pass this to [open_dataset()],
 #' in a list potentially with other `DatasetFactory` objects, to create
 #' a `Dataset`.

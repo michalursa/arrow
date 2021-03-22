@@ -137,12 +137,12 @@ test_binary() {
 test_apt() {
   for target in "debian:buster" \
                 "arm64v8/debian:buster" \
-                "ubuntu:xenial" \
-                "arm64v8/ubuntu:xenial" \
                 "ubuntu:bionic" \
                 "arm64v8/ubuntu:bionic" \
                 "ubuntu:focal" \
-                "arm64v8/ubuntu:focal"; do \
+                "arm64v8/ubuntu:focal" \
+                "ubuntu:groovy" \
+                "arm64v8/ubuntu:groovy"; do \
     case "${target}" in
       arm64v8/*)
         if [ "$(arch)" = "aarch64" -o -e /usr/bin/qemu-aarch64-static ]; then
@@ -156,7 +156,7 @@ test_apt() {
            "${target}" \
            /arrow/dev/release/verify-apt.sh \
            "${VERSION}" \
-           "yes" \
+           "rc" \
            "${BINTRAY_REPOSITORY}"; then
       echo "Failed to verify the APT repository for ${target}"
       exit 1
@@ -166,7 +166,6 @@ test_apt() {
 
 test_yum() {
   for target in "centos:7" \
-                "arm64v8/centos:7" \
                 "centos:8" \
                 "arm64v8/centos:8"; do
     case "${target}" in
@@ -182,7 +181,7 @@ test_yum() {
            "${target}" \
            /arrow/dev/release/verify-yum.sh \
            "${VERSION}" \
-           "yes" \
+           "rc" \
            "${BINTRAY_REPOSITORY}"; then
       echo "Failed to verify the Yum repository for ${target}"
       exit 1
@@ -213,7 +212,11 @@ setup_tempdir() {
 setup_miniconda() {
   # Setup short-lived miniconda for Python and integration tests
   if [ "$(uname)" == "Darwin" ]; then
-    MINICONDA_URL=https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh
+    if [ "$(uname -m)" == "arm64" ]; then
+	MINICONDA_URL=https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-arm64.sh
+    else
+        MINICONDA_URL=https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh
+    fi
   else
     MINICONDA_URL=https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
   fi
@@ -231,7 +234,7 @@ setup_miniconda() {
   . $MINICONDA/etc/profile.d/conda.sh
 
   conda create -n arrow-test -y -q -c conda-forge \
-    python=3.6 \
+    python=3.8 \
     nomkl \
     numpy \
     pandas \
@@ -311,7 +314,7 @@ test_csharp() {
       fi
     fi
   else
-    local dotnet_version=2.2.300
+    local dotnet_version=3.1.405
     local dotnet_platform=
     case "$(uname)" in
       Linux)
@@ -412,10 +415,11 @@ test_js() {
   if [ "${INSTALL_NODE}" -gt 0 ]; then
     export NVM_DIR="`pwd`/.nvm"
     mkdir -p $NVM_DIR
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.35.3/install.sh | bash
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.35.3/install.sh | \
+      PROFILE=/dev/null bash
     [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
-    nvm install node
+    nvm install --lts
   fi
 
   npm install
@@ -631,8 +635,8 @@ IMPORT_TESTS
 }
 
 test_linux_wheels() {
-  local py_arches="3.5m 3.6m 3.7m 3.8 3.9"
-  local manylinuxes="1 2010 2014"
+  local py_arches="3.6m 3.7m 3.8 3.9"
+  local manylinuxes="2010 2014"
 
   for py_arch in ${py_arches}; do
     local env=_verify_wheel-${py_arch}
@@ -656,7 +660,7 @@ test_linux_wheels() {
 }
 
 test_macos_wheels() {
-  local py_arches="3.5m 3.6m 3.7m 3.8 3.9"
+  local py_arches="3.6m 3.7m 3.8 3.9"
 
   for py_arch in ${py_arches}; do
     local env=_verify_wheel-${py_arch}

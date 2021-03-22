@@ -18,7 +18,6 @@
 use crate::{
     array::{ArrayData, OffsetSizeTrait},
     buffer::MutableBuffer,
-    datatypes::ToByteSlice,
 };
 
 use super::{
@@ -42,7 +41,7 @@ fn extend_offset_values<T: OffsetSizeTrait>(
 
 pub(super) fn build_extend<T: OffsetSizeTrait>(array: &ArrayData) -> Extend {
     let offsets = array.buffer::<T>(0);
-    let values = &array.buffers()[1].as_slice()[array.offset()..];
+    let values = array.buffers()[1].as_slice();
     if array.null_count() == 0 {
         // fast case where we can copy regions without null issues
         Box::new(
@@ -72,24 +71,21 @@ pub(super) fn build_extend<T: OffsetSizeTrait>(array: &ArrayData) -> Extend {
                 let mut last_offset: T = unsafe { get_last_offset(offset_buffer) };
 
                 // nulls present: append item by item, ignoring null entries
-                offset_buffer
-                    .reserve(offset_buffer.len() + len * std::mem::size_of::<T>());
+                offset_buffer.reserve(len * std::mem::size_of::<T>());
 
                 (start..start + len).for_each(|i| {
                     if array.is_valid(i) {
                         // compute the new offset
                         let length = offsets[i + 1] - offsets[i];
                         last_offset += length;
-                        let length = length.to_usize().unwrap();
 
                         // append value
-                        let start = offsets[i].to_usize().unwrap()
-                            - offsets[0].to_usize().unwrap();
-                        let bytes = &values[start..(start + length)];
+                        let bytes = &values[offsets[i].to_usize().unwrap()
+                            ..offsets[i + 1].to_usize().unwrap()];
                         values_buffer.extend_from_slice(bytes);
                     }
                     // offsets are always present
-                    offset_buffer.extend_from_slice(last_offset.to_byte_slice());
+                    offset_buffer.push(last_offset);
                 })
             },
         )
@@ -105,6 +101,5 @@ pub(super) fn extend_nulls<T: OffsetSizeTrait>(
     // this is safe due to how offset is built. See details on `get_last_offset`
     let last_offset: T = unsafe { get_last_offset(offset_buffer) };
 
-    let offsets = vec![last_offset; len];
-    offset_buffer.extend_from_slice(offsets.to_byte_slice());
+    (0..len).for_each(|_| offset_buffer.push(last_offset))
 }

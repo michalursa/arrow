@@ -40,6 +40,9 @@
 #include "arrow/status.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
+#include "arrow/type_fwd.h"
+#include "arrow/util/async_generator.h"
+#include "arrow/util/future.h"
 #include "arrow/util/iterator.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
@@ -49,19 +52,11 @@
 #include "arrow/util/utf8.h"
 
 namespace arrow {
-
-class MemoryPool;
-
-namespace io {
-
-class InputStream;
-
-}  // namespace io
-
 namespace csv {
 
-using internal::GetCpuThreadPool;
-using internal::ThreadPool;
+using internal::Executor;
+
+namespace {
 
 struct ConversionSchema {
   struct Column {
@@ -94,20 +89,24 @@ struct ConversionSchema {
 // An iterator of Buffers that makes sure there is no straddling CRLF sequence.
 class CSVBufferIterator {
  public:
-  explicit CSVBufferIterator(Iterator<std::shared_ptr<Buffer>> buffer_iterator)
-      : buffer_iterator_(std::move(buffer_iterator)) {}
-
   static Iterator<std::shared_ptr<Buffer>> Make(
       Iterator<std::shared_ptr<Buffer>> buffer_iterator) {
-    CSVBufferIterator it(std::move(buffer_iterator));
-    return Iterator<std::shared_ptr<Buffer>>(std::move(it));
+    Transformer<std::shared_ptr<Buffer>, std::shared_ptr<Buffer>> fn =
+        CSVBufferIterator();
+    return MakeTransformedIterator(std::move(buffer_iterator), fn);
   }
 
-  Result<std::shared_ptr<Buffer>> Next() {
-    ARROW_ASSIGN_OR_RAISE(auto buf, buffer_iterator_.Next());
+  static AsyncGenerator<std::shared_ptr<Buffer>> MakeAsync(
+      AsyncGenerator<std::shared_ptr<Buffer>> buffer_iterator) {
+    Transformer<std::shared_ptr<Buffer>, std::shared_ptr<Buffer>> fn =
+        CSVBufferIterator();
+    return MakeAsyncGenerator(std::move(buffer_iterator), fn);
+  }
+
+  Result<TransformFlow<std::shared_ptr<Buffer>>> operator()(std::shared_ptr<Buffer> buf) {
     if (buf == nullptr) {
       // EOF
-      return nullptr;
+      return TransformFinish();
     }
 
     int64_t offset = 0;
@@ -127,14 +126,13 @@ class CSVBufferIterator {
     buf = SliceBuffer(buf, offset);
     if (buf->size() == 0) {
       // EOF
-      return nullptr;
+      return TransformFinish();
     } else {
-      return buf;
+      return TransformYield(buf);
     }
   }
 
  protected:
-  Iterator<std::shared_ptr<Buffer>> buffer_iterator_;
   bool first_buffer_ = true;
   // Whether there was a trailing CR at the end of last received buffer
   bool trailing_cr_ = false;
@@ -150,20 +148,38 @@ struct CSVBlock {
   std::function<Status(int64_t)> consume_bytes;
 };
 
+}  // namespace
+}  // namespace csv
+
+template <>
+struct IterationTraits<csv::CSVBlock> {
+  static csv::CSVBlock End() { return csv::CSVBlock{{}, {}, {}, -1, true, {}}; }
+};
+
+namespace csv {
+namespace {
+
+// The == operator must be defined to be used as T in Iterator<T>
+bool operator==(const CSVBlock& left, const CSVBlock& right) {
+  return left.block_index == right.block_index;
+}
+bool operator!=(const CSVBlock& left, const CSVBlock& right) {
+  return left.block_index != right.block_index;
+}
+
+// This is a callable that can be used to transform an iterator.  The source iterator
+// will contain buffers of data and the output iterator will contain delimited CSV
+// blocks.  util::optional is used so that there is an end token (required by the
+// iterator APIs (e.g. Visit)) even though an empty optional is never used in this code.
 class BlockReader {
  public:
-  BlockReader(std::unique_ptr<Chunker> chunker,
-              Iterator<std::shared_ptr<Buffer>> buffer_iterator,
-              std::shared_ptr<Buffer> first_buffer)
+  BlockReader(std::unique_ptr<Chunker> chunker, std::shared_ptr<Buffer> first_buffer)
       : chunker_(std::move(chunker)),
-        buffer_iterator_(std::move(buffer_iterator)),
         partial_(std::make_shared<Buffer>("")),
         buffer_(std::move(first_buffer)) {}
 
  protected:
   std::unique_ptr<Chunker> chunker_;
-  Iterator<std::shared_ptr<Buffer>> buffer_iterator_;
-
   std::shared_ptr<Buffer> partial_, buffer_;
   int64_t block_index_ = 0;
   // Whether there was a trailing CR at the end of last received buffer
@@ -177,14 +193,25 @@ class SerialBlockReader : public BlockReader {
  public:
   using BlockReader::BlockReader;
 
-  Result<arrow::util::optional<CSVBlock>> Next() {
+  static Iterator<CSVBlock> MakeIterator(
+      Iterator<std::shared_ptr<Buffer>> buffer_iterator, std::unique_ptr<Chunker> chunker,
+      std::shared_ptr<Buffer> first_buffer) {
+    auto block_reader =
+        std::make_shared<SerialBlockReader>(std::move(chunker), first_buffer);
+    // Wrap shared pointer in callable
+    Transformer<std::shared_ptr<Buffer>, CSVBlock> block_reader_fn =
+        [block_reader](std::shared_ptr<Buffer> buf) {
+          return (*block_reader)(std::move(buf));
+        };
+    return MakeTransformedIterator(std::move(buffer_iterator), block_reader_fn);
+  }
+
+  Result<TransformFlow<CSVBlock>> operator()(std::shared_ptr<Buffer> next_buffer) {
     if (buffer_ == nullptr) {
-      // EOF
-      return util::optional<CSVBlock>();
+      return TransformFinish();
     }
 
-    std::shared_ptr<Buffer> next_buffer, completion;
-    ARROW_ASSIGN_OR_RAISE(next_buffer, buffer_iterator_.Next());
+    std::shared_ptr<Buffer> completion;
     bool is_final = (next_buffer == nullptr);
 
     if (is_final) {
@@ -210,8 +237,9 @@ class SerialBlockReader : public BlockReader {
       return Status::OK();
     };
 
-    return CSVBlock{partial_,       completion, buffer_,
-                    block_index_++, is_final,   std::move(consume_bytes)};
+    return TransformYield<CSVBlock>(CSVBlock{partial_, completion, buffer_,
+                                             block_index_++, is_final,
+                                             std::move(consume_bytes)});
   }
 };
 
@@ -220,14 +248,35 @@ class ThreadedBlockReader : public BlockReader {
  public:
   using BlockReader::BlockReader;
 
-  Result<arrow::util::optional<CSVBlock>> Next() {
+  static Iterator<CSVBlock> MakeIterator(
+      Iterator<std::shared_ptr<Buffer>> buffer_iterator, std::unique_ptr<Chunker> chunker,
+      std::shared_ptr<Buffer> first_buffer) {
+    auto block_reader =
+        std::make_shared<ThreadedBlockReader>(std::move(chunker), first_buffer);
+    // Wrap shared pointer in callable
+    Transformer<std::shared_ptr<Buffer>, CSVBlock> block_reader_fn =
+        [block_reader](std::shared_ptr<Buffer> next) { return (*block_reader)(next); };
+    return MakeTransformedIterator(std::move(buffer_iterator), block_reader_fn);
+  }
+
+  static AsyncGenerator<CSVBlock> MakeAsyncIterator(
+      AsyncGenerator<std::shared_ptr<Buffer>> buffer_generator,
+      std::unique_ptr<Chunker> chunker, std::shared_ptr<Buffer> first_buffer) {
+    auto block_reader =
+        std::make_shared<ThreadedBlockReader>(std::move(chunker), first_buffer);
+    // Wrap shared pointer in callable
+    Transformer<std::shared_ptr<Buffer>, CSVBlock> block_reader_fn =
+        [block_reader](std::shared_ptr<Buffer> next) { return (*block_reader)(next); };
+    return MakeAsyncGenerator(std::move(buffer_generator), block_reader_fn);
+  }
+
+  Result<TransformFlow<CSVBlock>> operator()(std::shared_ptr<Buffer> next_buffer) {
     if (buffer_ == nullptr) {
       // EOF
-      return util::optional<CSVBlock>();
+      return TransformFinish();
     }
 
-    std::shared_ptr<Buffer> next_buffer, whole, completion, next_partial;
-    ARROW_ASSIGN_OR_RAISE(next_buffer, buffer_iterator_.Next());
+    std::shared_ptr<Buffer> whole, completion, next_partial;
     bool is_final = (next_buffer == nullptr);
 
     auto current_partial = std::move(partial_);
@@ -252,7 +301,8 @@ class ThreadedBlockReader : public BlockReader {
     partial_ = std::move(next_partial);
     buffer_ = std::move(next_buffer);
 
-    return CSVBlock{current_partial, completion, whole, block_index_++, is_final, {}};
+    return TransformYield<CSVBlock>(
+        CSVBlock{current_partial, completion, whole, block_index_++, is_final, {}});
   }
 };
 
@@ -263,12 +313,13 @@ class ReaderMixin {
  public:
   ReaderMixin(MemoryPool* pool, std::shared_ptr<io::InputStream> input,
               const ReadOptions& read_options, const ParseOptions& parse_options,
-              const ConvertOptions& convert_options)
+              const ConvertOptions& convert_options, StopToken stop_token)
       : pool_(pool),
         read_options_(read_options),
         parse_options_(parse_options),
         convert_options_(convert_options),
-        input_(std::move(input)) {}
+        input_(std::move(input)),
+        stop_token_(std::move(stop_token)) {}
 
  protected:
   // Read header and column names from buffer, create column builders
@@ -449,8 +500,8 @@ class ReaderMixin {
   ConversionSchema conversion_schema_;
 
   std::shared_ptr<io::InputStream> input_;
-  Iterator<std::shared_ptr<Buffer>> buffer_iterator_;
   std::shared_ptr<internal::TaskGroup> task_group_;
+  StopToken stop_token_;
 };
 
 /////////////////////////////////////////////////////////////////////////
@@ -461,6 +512,10 @@ class BaseTableReader : public ReaderMixin, public csv::TableReader {
   using ReaderMixin::ReaderMixin;
 
   virtual Status Init() = 0;
+
+  Future<std::shared_ptr<Table>> ReadAsync() override {
+    return Future<std::shared_ptr<Table>>::MakeFinished(Read());
+  }
 
  protected:
   // Make column builders from conversion schema
@@ -624,6 +679,7 @@ class BaseStreamingReader : public ReaderMixin, public csv::StreamingReader {
   std::vector<std::shared_ptr<ColumnDecoder>> column_decoders_;
   std::shared_ptr<Schema> schema_;
   std::shared_ptr<RecordBatch> pending_batch_;
+  Iterator<std::shared_ptr<Buffer>> buffer_iterator_;
   bool eof_ = false;
 };
 
@@ -643,7 +699,7 @@ class SerialStreamingReader : public BaseStreamingReader {
     ARROW_ASSIGN_OR_RAISE(auto rh_it,
                           MakeReadaheadIterator(std::move(istream_it), block_queue_size));
     buffer_iterator_ = CSVBufferIterator::Make(std::move(rh_it));
-    task_group_ = internal::TaskGroup::MakeSerial();
+    task_group_ = internal::TaskGroup::MakeSerial(stop_token_);
 
     // Read schema from first batch
     ARROW_ASSIGN_OR_RAISE(pending_batch_, ReadNext());
@@ -656,7 +712,11 @@ class SerialStreamingReader : public BaseStreamingReader {
     if (eof_) {
       return nullptr;
     }
-    if (block_reader_ == nullptr) {
+    if (stop_token_.IsStopRequested()) {
+      eof_ = true;
+      return stop_token_.Poll();
+    }
+    if (!block_iterator_) {
       Status st = SetupReader();
       if (!st.ok()) {
         // Can't setup reader => bail out
@@ -670,18 +730,18 @@ class SerialStreamingReader : public BaseStreamingReader {
     }
 
     if (!source_eof_) {
-      ARROW_ASSIGN_OR_RAISE(auto maybe_block, block_reader_->Next());
-      if (maybe_block.has_value()) {
-        last_block_index_ = maybe_block->block_index;
-        auto maybe_parsed = ParseAndInsert(maybe_block->partial, maybe_block->completion,
-                                           maybe_block->buffer, maybe_block->block_index,
-                                           maybe_block->is_final);
+      ARROW_ASSIGN_OR_RAISE(auto maybe_block, block_iterator_.Next());
+      if (maybe_block != IterationTraits<CSVBlock>::End()) {
+        last_block_index_ = maybe_block.block_index;
+        auto maybe_parsed = ParseAndInsert(maybe_block.partial, maybe_block.completion,
+                                           maybe_block.buffer, maybe_block.block_index,
+                                           maybe_block.is_final);
         if (!maybe_parsed.ok()) {
           // Parse error => bail out
           eof_ = true;
           return maybe_parsed.status();
         }
-        RETURN_NOT_OK(maybe_block->consume_bytes(*maybe_parsed));
+        RETURN_NOT_OK(maybe_block.consume_bytes(*maybe_parsed));
       } else {
         source_eof_ = true;
         for (auto& decoder : column_decoders_) {
@@ -705,15 +765,15 @@ class SerialStreamingReader : public BaseStreamingReader {
     RETURN_NOT_OK(ProcessHeader(first_buffer, &first_buffer));
     RETURN_NOT_OK(MakeColumnDecoders());
 
-    block_reader_ = std::make_shared<SerialBlockReader>(MakeChunker(parse_options_),
-                                                        std::move(buffer_iterator_),
-                                                        std::move(first_buffer));
+    block_iterator_ = SerialBlockReader::MakeIterator(std::move(buffer_iterator_),
+                                                      MakeChunker(parse_options_),
+                                                      std::move(first_buffer));
     return Status::OK();
   }
 
   bool source_eof_ = false;
   int64_t last_block_index_ = 0;
-  std::shared_ptr<SerialBlockReader> block_reader_;
+  Iterator<CSVBlock> block_iterator_;
 };
 
 /////////////////////////////////////////////////////////////////////////
@@ -736,7 +796,7 @@ class SerialTableReader : public BaseTableReader {
   }
 
   Result<std::shared_ptr<Table>> Read() override {
-    task_group_ = internal::TaskGroup::MakeSerial();
+    task_group_ = internal::TaskGroup::MakeSerial(stop_token_);
 
     // First block
     ARROW_ASSIGN_OR_RAISE(auto first_buffer, buffer_iterator_.Next());
@@ -746,41 +806,49 @@ class SerialTableReader : public BaseTableReader {
     RETURN_NOT_OK(ProcessHeader(first_buffer, &first_buffer));
     RETURN_NOT_OK(MakeColumnBuilders());
 
-    SerialBlockReader block_reader(MakeChunker(parse_options_),
-                                   std::move(buffer_iterator_), std::move(first_buffer));
-
+    auto block_iterator = SerialBlockReader::MakeIterator(std::move(buffer_iterator_),
+                                                          MakeChunker(parse_options_),
+                                                          std::move(first_buffer));
     while (true) {
-      ARROW_ASSIGN_OR_RAISE(auto maybe_block, block_reader.Next());
-      if (!maybe_block.has_value()) {
+      RETURN_NOT_OK(stop_token_.Poll());
+
+      ARROW_ASSIGN_OR_RAISE(auto maybe_block, block_iterator.Next());
+      if (maybe_block == IterationTraits<CSVBlock>::End()) {
         // EOF
         break;
       }
-      ARROW_ASSIGN_OR_RAISE(int64_t parsed_bytes,
-                            ParseAndInsert(maybe_block->partial, maybe_block->completion,
-                                           maybe_block->buffer, maybe_block->block_index,
-                                           maybe_block->is_final));
-      RETURN_NOT_OK(maybe_block->consume_bytes(parsed_bytes));
+      ARROW_ASSIGN_OR_RAISE(
+          int64_t parsed_bytes,
+          ParseAndInsert(maybe_block.partial, maybe_block.completion, maybe_block.buffer,
+                         maybe_block.block_index, maybe_block.is_final));
+      RETURN_NOT_OK(maybe_block.consume_bytes(parsed_bytes));
     }
     // Finish conversion, create schema and table
     RETURN_NOT_OK(task_group_->Finish());
     return MakeTable();
   }
+
+ protected:
+  Iterator<std::shared_ptr<Buffer>> buffer_iterator_;
 };
 
-/////////////////////////////////////////////////////////////////////////
-// Parallel TableReader implementation
-
-class ThreadedTableReader : public BaseTableReader {
+class AsyncThreadedTableReader
+    : public BaseTableReader,
+      public std::enable_shared_from_this<AsyncThreadedTableReader> {
  public:
   using BaseTableReader::BaseTableReader;
 
-  ThreadedTableReader(MemoryPool* pool, std::shared_ptr<io::InputStream> input,
-                      const ReadOptions& read_options, const ParseOptions& parse_options,
-                      const ConvertOptions& convert_options, ThreadPool* thread_pool)
-      : BaseTableReader(pool, input, read_options, parse_options, convert_options),
-        thread_pool_(thread_pool) {}
+  AsyncThreadedTableReader(MemoryPool* pool, std::shared_ptr<io::InputStream> input,
+                           const ReadOptions& read_options,
+                           const ParseOptions& parse_options,
+                           const ConvertOptions& convert_options, StopToken stop_token,
+                           Executor* cpu_executor, Executor* io_executor)
+      : BaseTableReader(pool, input, read_options, parse_options, convert_options,
+                        std::move(stop_token)),
+        cpu_executor_(cpu_executor),
+        io_executor_(io_executor) {}
 
-  ~ThreadedTableReader() override {
+  ~AsyncThreadedTableReader() override {
     if (task_group_) {
       // In case of error, make sure all pending tasks are finished before
       // we start destroying BaseTableReader members
@@ -792,82 +860,149 @@ class ThreadedTableReader : public BaseTableReader {
     ARROW_ASSIGN_OR_RAISE(auto istream_it,
                           io::MakeInputStreamIterator(input_, read_options_.block_size));
 
-    int32_t block_queue_size = thread_pool_->GetCapacity();
-    ARROW_ASSIGN_OR_RAISE(auto rh_it,
-                          MakeReadaheadIterator(std::move(istream_it), block_queue_size));
-    buffer_iterator_ = CSVBufferIterator::Make(std::move(rh_it));
+    ARROW_ASSIGN_OR_RAISE(auto bg_it,
+                          MakeBackgroundGenerator(std::move(istream_it), io_executor_));
+
+    auto transferred_it = MakeTransferredGenerator(bg_it, cpu_executor_);
+
+    int32_t block_queue_size = std::max(2, cpu_executor_->GetCapacity());
+    auto rh_it =
+        MakeSerialReadaheadGenerator(std::move(transferred_it), block_queue_size);
+    buffer_generator_ = CSVBufferIterator::MakeAsync(std::move(rh_it));
     return Status::OK();
   }
 
-  Result<std::shared_ptr<Table>> Read() override {
-    task_group_ = internal::TaskGroup::MakeThreaded(thread_pool_);
+  Result<std::shared_ptr<Table>> Read() override { return ReadAsync().result(); }
 
-    // First block
-    ARROW_ASSIGN_OR_RAISE(auto first_buffer, buffer_iterator_.Next());
-    if (first_buffer == nullptr) {
-      return Status::Invalid("Empty CSV file");
-    }
-    RETURN_NOT_OK(ProcessHeader(first_buffer, &first_buffer));
-    RETURN_NOT_OK(MakeColumnBuilders());
+  Future<std::shared_ptr<Table>> ReadAsync() override {
+    task_group_ = internal::TaskGroup::MakeThreaded(cpu_executor_, stop_token_);
 
-    ThreadedBlockReader block_reader(MakeChunker(parse_options_),
-                                     std::move(buffer_iterator_),
-                                     std::move(first_buffer));
+    auto self = shared_from_this();
+    return ProcessFirstBuffer().Then([self](std::shared_ptr<Buffer> first_buffer) {
+      auto block_generator = ThreadedBlockReader::MakeAsyncIterator(
+          self->buffer_generator_, MakeChunker(self->parse_options_),
+          std::move(first_buffer));
 
-    while (true) {
-      ARROW_ASSIGN_OR_RAISE(auto maybe_block, block_reader.Next());
-      if (!maybe_block.has_value()) {
-        // EOF
-        break;
-      }
-      DCHECK(!maybe_block->consume_bytes);
+      std::function<Status(CSVBlock)> block_visitor =
+          [self](CSVBlock maybe_block) -> Status {
+        // The logic in VisitAsyncGenerator ensures that we will never be
+        // passed an empty block (visit does not call with the end token) so
+        // we can be assured maybe_block has a value.
+        DCHECK_GE(maybe_block.block_index, 0);
+        DCHECK(!maybe_block.consume_bytes);
 
-      // Launch parse task
-      task_group_->Append([this, maybe_block] {
-        return ParseAndInsert(maybe_block->partial, maybe_block->completion,
-                              maybe_block->buffer, maybe_block->block_index,
-                              maybe_block->is_final)
-            .status();
-      });
-    }
+        // Launch parse task
+        self->task_group_->Append([self, maybe_block] {
+          return self
+              ->ParseAndInsert(maybe_block.partial, maybe_block.completion,
+                               maybe_block.buffer, maybe_block.block_index,
+                               maybe_block.is_final)
+              .status();
+        });
+        return Status::OK();
+      };
 
-    // Finish conversion, create schema and table
-    RETURN_NOT_OK(task_group_->Finish());
-    return MakeTable();
+      return VisitAsyncGenerator(std::move(block_generator), block_visitor)
+          .Then([self](...) -> Future<> {
+            // By this point we've added all top level tasks so it is safe to call
+            // FinishAsync
+            return self->task_group_->FinishAsync();
+          })
+          .Then([self](...) -> Result<std::shared_ptr<Table>> {
+            // Finish conversion, create schema and table
+            return self->MakeTable();
+          });
+    });
   }
 
  protected:
-  ThreadPool* thread_pool_;
+  Future<std::shared_ptr<Buffer>> ProcessFirstBuffer() {
+    // First block
+    auto first_buffer_future = buffer_generator_();
+    return first_buffer_future.Then([this](const std::shared_ptr<Buffer>& first_buffer)
+                                        -> Result<std::shared_ptr<Buffer>> {
+      if (first_buffer == nullptr) {
+        return Status::Invalid("Empty CSV file");
+      }
+      std::shared_ptr<Buffer> first_buffer_processed;
+      RETURN_NOT_OK(ProcessHeader(first_buffer, &first_buffer_processed));
+      RETURN_NOT_OK(MakeColumnBuilders());
+      return first_buffer_processed;
+    });
+  }
+
+  Executor* cpu_executor_;
+  Executor* io_executor_;
+  AsyncGenerator<std::shared_ptr<Buffer>> buffer_generator_;
 };
+
+Result<std::shared_ptr<TableReader>> MakeTableReader(
+    MemoryPool* pool, io::IOContext io_context, std::shared_ptr<io::InputStream> input,
+    const ReadOptions& read_options, const ParseOptions& parse_options,
+    const ConvertOptions& convert_options) {
+  std::shared_ptr<BaseTableReader> reader;
+  if (read_options.use_threads) {
+    auto cpu_executor = internal::GetCpuThreadPool();
+    auto io_executor = io_context.executor();
+    reader = std::make_shared<AsyncThreadedTableReader>(
+        pool, input, read_options, parse_options, convert_options,
+        io_context.stop_token(), cpu_executor, io_executor);
+  } else {
+    reader =
+        std::make_shared<SerialTableReader>(pool, input, read_options, parse_options,
+                                            convert_options, io_context.stop_token());
+  }
+  RETURN_NOT_OK(reader->Init());
+  return reader;
+}
+
+Result<std::shared_ptr<StreamingReader>> MakeStreamingReader(
+    io::IOContext io_context, std::shared_ptr<io::InputStream> input,
+    const ReadOptions& read_options, const ParseOptions& parse_options,
+    const ConvertOptions& convert_options) {
+  std::shared_ptr<BaseStreamingReader> reader;
+  reader = std::make_shared<SerialStreamingReader>(io_context.pool(), input, read_options,
+                                                   parse_options, convert_options,
+                                                   io_context.stop_token());
+  RETURN_NOT_OK(reader->Init());
+  return reader;
+}
+
+}  // namespace
 
 /////////////////////////////////////////////////////////////////////////
 // Factory functions
 
 Result<std::shared_ptr<TableReader>> TableReader::Make(
-    MemoryPool* pool, std::shared_ptr<io::InputStream> input,
+    io::IOContext io_context, std::shared_ptr<io::InputStream> input,
     const ReadOptions& read_options, const ParseOptions& parse_options,
     const ConvertOptions& convert_options) {
-  std::shared_ptr<BaseTableReader> reader;
-  if (read_options.use_threads) {
-    reader = std::make_shared<ThreadedTableReader>(
-        pool, input, read_options, parse_options, convert_options, GetCpuThreadPool());
-  } else {
-    reader = std::make_shared<SerialTableReader>(pool, input, read_options, parse_options,
-                                                 convert_options);
-  }
-  RETURN_NOT_OK(reader->Init());
-  return reader;
+  return MakeTableReader(io_context.pool(), io_context, std::move(input), read_options,
+                         parse_options, convert_options);
+}
+
+Result<std::shared_ptr<TableReader>> TableReader::Make(
+    MemoryPool* pool, io::IOContext io_context, std::shared_ptr<io::InputStream> input,
+    const ReadOptions& read_options, const ParseOptions& parse_options,
+    const ConvertOptions& convert_options) {
+  return MakeTableReader(pool, io_context, std::move(input), read_options, parse_options,
+                         convert_options);
 }
 
 Result<std::shared_ptr<StreamingReader>> StreamingReader::Make(
     MemoryPool* pool, std::shared_ptr<io::InputStream> input,
     const ReadOptions& read_options, const ParseOptions& parse_options,
     const ConvertOptions& convert_options) {
-  std::shared_ptr<BaseStreamingReader> reader;
-  reader = std::make_shared<SerialStreamingReader>(pool, input, read_options,
-                                                   parse_options, convert_options);
-  RETURN_NOT_OK(reader->Init());
-  return reader;
+  return MakeStreamingReader(io::IOContext(pool), std::move(input), read_options,
+                             parse_options, convert_options);
+}
+
+Result<std::shared_ptr<StreamingReader>> StreamingReader::Make(
+    io::IOContext io_context, std::shared_ptr<io::InputStream> input,
+    const ReadOptions& read_options, const ParseOptions& parse_options,
+    const ConvertOptions& convert_options) {
+  return MakeStreamingReader(io_context, std::move(input), read_options, parse_options,
+                             convert_options);
 }
 
 }  // namespace csv

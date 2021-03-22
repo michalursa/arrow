@@ -76,9 +76,7 @@ class PartitioningOrFactory;
 class DirectoryPartitioning;
 class HivePartitioning;
 
-struct ScanContext;
-
-class ScanOptions;
+struct ScanOptions;
 
 class Scanner;
 
@@ -87,8 +85,6 @@ class ScannerBuilder;
 class ScanTask;
 using ScanTaskVector = std::vector<std::shared_ptr<ScanTask>>;
 using ScanTaskIterator = Iterator<std::shared_ptr<ScanTask>>;
-
-class RecordBatchProjector;
 
 }  // namespace dataset
 }  // namespace arrow
