@@ -392,13 +392,38 @@ if(ARROW_COMPUTE)
               compute/kernels/vector_hash.cc
               compute/kernels/vector_nested.cc
               compute/kernels/vector_selection.cc
-              compute/kernels/vector_sort.cc)
+              compute/kernels/vector_sort.cc
+              exec/groupby_hash.cc
+              exec/groupby_map.cc
+              exec/groupby_storage.cc
+              exec/groupby.cc
+              exec/util.cc)              
 
   if(ARROW_HAVE_RUNTIME_AVX2)
     list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx2.cc)
     set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON)
     set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+    list(APPEND ARROW_SRCS exec/groupby_hash_avx2.cc)
+    set_source_files_properties(exec/groupby_hash_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(exec/groupby_hash_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+    list(APPEND ARROW_SRCS exec/groupby_map_avx2.cc)
+    set_source_files_properties(exec/groupby_map_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(exec/groupby_map_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+    list(APPEND ARROW_SRCS exec/groupby_storage_avx2.cc)
+    set_source_files_properties(exec/groupby_storage_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(exec/groupby_storage_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+    list(APPEND ARROW_SRCS exec/util_avx2.cc)
+    set_source_files_properties(exec/util_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(exec/util_avx2.cc PROPERTIES
                                 COMPILE_FLAGS ${ARROW_AVX2_FLAG})
   endif()
   if(ARROW_HAVE_RUNTIME_AVX512)

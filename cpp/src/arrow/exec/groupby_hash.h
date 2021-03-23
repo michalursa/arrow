@@ -1,0 +1,75 @@
+#pragma once
+
+#include <immintrin.h>
+#include <cstdint>
+#include "common.h"
+#include "util.h"
+
+namespace arrow {
+namespace exec {
+
+// Implementations are based on xxh3 32-bit algorithm description from:
+// https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
+//
+class Hashing {
+ public:
+  static void hash_fixed(util::CPUInstructionSet instruction_set, uint32_t num_keys,
+                         uint32_t length_key, const uint8_t* keys, uint32_t* hashes);
+
+  static void hash_varlen(util::CPUInstructionSet instruction_set, uint32_t num_rows,
+                          const uint32_t* offsets, const uint8_t* concatenated_keys,
+                          uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
+                          uint32_t* hashes);
+
+ private:
+  static const uint32_t PRIME32_1 = 0x9E3779B1;  // 0b10011110001101110111100110110001
+  static const uint32_t PRIME32_2 = 0x85EBCA77;  // 0b10000101111010111100101001110111
+  static const uint32_t PRIME32_3 = 0xC2B2AE3D;  // 0b11000010101100101010111000111101
+  static const uint32_t PRIME32_4 = 0x27D4EB2F;  // 0b00100111110101001110101100101111
+  static const uint32_t PRIME32_5 = 0x165667B1;  // 0b00010110010101100110011110110001
+
+  // Avalanche
+  static inline uint32_t avalanche_helper(uint32_t& acc);
+#if defined(ARROW_HAVE_AVX2)
+  static void avalanche_avx2(uint32_t num_keys, uint32_t* hashes);
+#endif
+  static void avalanche(util::CPUInstructionSet instruction_set, uint32_t num_keys,
+                        uint32_t* hashes);
+
+  // Accumulator combine
+  static inline uint32_t combine_accumulators(const uint32_t acc1, const uint32_t acc2,
+                                              const uint32_t acc3, const uint32_t acc4);
+#if defined(ARROW_HAVE_AVX2)
+  static inline uint64_t combine_accumulators_avx2(__m256i acc);
+#endif
+
+  // Helpers
+  static inline void helper_8B(uint32_t key_length, uint32_t num_keys,
+                               const uint8_t* keys, uint32_t* hashes);
+  static inline void helper_stripe(uint32_t offset, uint64_t mask_hi, const uint8_t* keys,
+                                   uint32_t& acc1, uint32_t& acc2, uint32_t& acc3,
+                                   uint32_t& acc4);
+  static inline uint32_t helper_tail(uint32_t offset, uint64_t mask, const uint8_t* keys,
+                                     uint32_t acc);
+#if defined(ARROW_HAVE_AVX2)
+  static void helper_stripes_avx2(uint32_t num_keys, uint32_t key_length,
+                                  const uint8_t* keys, uint32_t* hash);
+  static void helper_tails_avx2(uint32_t num_keys, uint32_t key_length,
+                                const uint8_t* keys, uint32_t* hash);
+#endif
+  static void helper_stripes(util::CPUInstructionSet instruction_set, uint32_t num_keys,
+                             uint32_t key_length, const uint8_t* keys, uint32_t* hash);
+  static void helper_tails(util::CPUInstructionSet instruction_set, uint32_t num_keys,
+                           uint32_t key_length, const uint8_t* keys, uint32_t* hash);
+
+  static void hash_varlen_helper(uint32_t length, const uint8_t* key, uint32_t* acc);
+#if defined(ARROW_HAVE_AVX2)
+  static void hash_varlen_avx2(uint32_t num_rows, const uint32_t* offsets,
+                               const uint8_t* concatenated_keys,
+                               uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
+                               uint32_t* hashes);
+#endif
+};
+
+}  // namespace exec
+}  // namespace arrow
