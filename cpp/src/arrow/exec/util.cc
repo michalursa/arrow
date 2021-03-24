@@ -21,13 +21,16 @@
 #include "arrow/util/bitmap_ops.h"
 
 namespace arrow {
+
+using BitUtil::CountTrailingZeros;
+
 namespace exec {
 namespace util {
 
 inline void BitUtil::bits_to_indexes_helper(uint64_t word, uint16_t base_index,
                                             int& num_indexes, uint16_t* indexes) {
   while (word) {
-    indexes[num_indexes++] = base_index + static_cast<uint16_t>(TZCNT64(word));
+    indexes[num_indexes++] = base_index + static_cast<uint16_t>(CountTrailingZeros(word));
     word &= word - 1;
   }
 }
@@ -36,7 +39,7 @@ inline void BitUtil::bits_filter_indexes_helper(uint64_t word,
                                                 const uint16_t* input_indexes,
                                                 int& num_indexes, uint16_t* indexes) {
   while (word) {
-    indexes[num_indexes++] = input_indexes[TZCNT64(word)];
+    indexes[num_indexes++] = input_indexes[CountTrailingZeros(word)];
     word &= word - 1;
   }
 }

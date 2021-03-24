@@ -16,14 +16,14 @@
 // under the License.
 
 #pragma once
-#include "arrow/memory_pool.h"
-#include "arrow/result.h"
-#include "arrow/status.h"
 #include "arrow/exec/common.h"
 #include "arrow/exec/groupby_hash.h"
 #include "arrow/exec/groupby_map.h"
 #include "arrow/exec/groupby_storage.h"
 #include "arrow/exec/util.h"
+#include "arrow/memory_pool.h"
+#include "arrow/result.h"
+#include "arrow/status.h"
 
 namespace arrow {
 namespace exec {
@@ -32,15 +32,15 @@ class GroupMap {
  public:
   ~GroupMap();
 
-  void init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool,
-            uint32_t num_columns, const std::vector<bool>& is_fixed_len_in,
-            const uint32_t* col_widths_in);
+  Status init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool,
+              uint32_t num_columns, const std::vector<bool>& is_fixed_len_in,
+              const uint32_t* col_widths_in);
 
-  void push_input(uint32_t num_rows, const uint8_t** non_null_buffers_maybe_null,
-                  const uint8_t** fixedlen_buffers,
-                  const uint8_t** varlen_buffers_maybe_null, uint32_t* group_ids);
+  Status push_input(uint32_t num_rows, const uint8_t** non_null_buffers_maybe_null,
+                    const uint8_t** fixedlen_buffers,
+                    const uint8_t** varlen_buffers_maybe_null, uint32_t* group_ids);
 
-  void pull_output_prepare(uint64_t& out_num_rows, bool& is_row_fixedlen);
+  void pull_output_prepare(uint64_t* out_num_rows, bool* is_row_fixedlen);
 
   void pull_output_fixedlen_and_nulls(uint8_t** non_null_buffers,
                                       uint8_t** fixedlen_buffers,

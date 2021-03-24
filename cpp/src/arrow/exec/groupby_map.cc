@@ -24,60 +24,44 @@
 #include <cstdint>
 
 #include "arrow/exec/common.h"
+#include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
 
 namespace arrow {
+
+using BitUtil::CountLeadingZeros;
+
 namespace exec {
 
-// Scan bytes in block in reverse and stop as soon
-// as a position of interest is found, which is either of:
-// a) slot with a matching stamp is encountered,
-// b) first empty slot is encountered,
-// c) we reach the end of the block.
-// Return an index corresponding to this position (8 represents end of block).
-// Return also an integer flag (0 or 1) indicating if we reached case a)
-// (if we found a stamp match).
+constexpr uint64_t kHighBitOfEachByte = 0x8080808080808080ULL;
+
 //
 template <bool use_start_slot>
-inline void SwissTable::search_block(
-    uint64_t block,  // 8B block of hash table
-    int stamp,       // 7-bits of hash used as a stamp
-    int start_slot,  // Index of the first slot in the block to start search from.
-                     // We assume that this index always points to a non-empty slot
-                     // (comes before any empty slots).
-                     // Used only by one template variant.
-    int& out_slot,   // Returned index of a slot
-    int& out_match_found) {  // Returned integer flag indicating match found
+inline void SwissTable::search_block(uint64_t block, int stamp, int start_slot,
+                                     int* out_slot, int* out_match_found) {
   // Filled slot bytes have the highest bit set to 0 and empty slots are equal to 0x80.
   // Replicate 7-bit stamp to all non-empty slots:
-  uint64_t block_high_bits = block & UINT64_C(0x8080808080808080);
-  uint64_t stamp_pattern =
-      stamp * ((block_high_bits ^ UINT64_C(0x8080808080808080)) >> 7);
+  uint64_t block_high_bits = block & kHighBitOfEachByte;
+  uint64_t stamp_pattern = stamp * ((block_high_bits ^ kHighBitOfEachByte) >> 7);
   // If we xor this pattern with block bytes we get:
   // a) 0x00, for filled slots matching the stamp,
   // b) 0x00 < x < 0x80, for filled slots not matching the stamp,
   // c) 0x80, for empty slots.
   // If we then add 0x7f to every byte, negate the result and leave only the highest bits
   // in each byte, we get 0x00 for non-match slot and 0x80 for match slot.
-  uint64_t matches = ~((block ^ stamp_pattern) + UINT64_C(0x7f7f7f7f7f7f7f7f));
+  uint64_t matches = ~((block ^ stamp_pattern) + ~kHighBitOfEachByte);
   if (use_start_slot) {
-    matches &= UINT64_C(0x8080808080808080) >> (8 * start_slot);
+    matches &= kHighBitOfEachByte >> (8 * start_slot);
   } else {
-    matches &= UINT64_C(0x8080808080808080);
+    matches &= kHighBitOfEachByte;
   }
   // We get 0 if there are no matches
-  out_match_found = (matches == 0 ? 0 : 1);
+  *out_match_found = (matches == 0 ? 0 : 1);
   // Now if we or with the highest bits of the block and scan zero bits in reverse,
   // we get 8x slot index that we were looking for.
-  out_slot = static_cast<int>(LZCNT64(matches | block_high_bits) >> 3);
+  *out_slot = static_cast<int>(CountLeadingZeros(matches | block_high_bits) >> 3);
 }
 
-// Extract group id for a given slot in a given block.
-// Group ids follow in memory after 64-bit block data.
-// Maximum number of groups inserted is equal to the number
-// of all slots in all blocks, which is 8 * the number of blocks.
-// Group ids are bit packed using that maximum to determine the necessary number of bits.
-//
 inline uint64_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
                                              uint64_t group_id_mask) {
   int num_bits_group_id = log_blocks_ + 3;
@@ -127,7 +111,7 @@ void SwissTable::lookup_1(const uint16_t* selection, const int num_keys,
 
     int match_found;
     int islot_in_block;
-    search_block<false>(block, stamp, 0, islot_in_block, match_found);
+    search_block<false>(block, stamp, 0, &islot_in_block, &match_found);
     uint64_t groupid = extract_group_id(blockbase, islot_in_block, groupid_mask);
     ARROW_DCHECK(groupid < num_inserted_ || num_inserted_ == 0);
     uint64_t islot = next_slot_to_visit(iblock, islot_in_block, match_found);
@@ -224,9 +208,9 @@ Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
     } else {
       int new_match_found;
       int new_slot;
-      search_block<true>(block, static_cast<int>(stamp), start_slot, new_slot,
-                         new_match_found);
-      uint32_t new_groupid =
+      search_block<true>(block, static_cast<int>(stamp), start_slot, &new_slot,
+                         &new_match_found);
+      auto new_groupid =
           static_cast<uint32_t>(extract_group_id(blockbase, new_slot, groupid_mask));
       ARROW_DCHECK(new_groupid < num_inserted_ + num_ids[category_inserted]);
       new_slot =
@@ -393,12 +377,14 @@ Status SwissTable::grow_double() {
     uint8_t* block_base = blocks_ + i * block_size_before;
     uint8_t* double_block_base_new = blocks_new + 2 * i * block_size_after;
     uint64_t block = *reinterpret_cast<const uint64_t*>(block_base);
-    int full_slots = static_cast<int>(LZCNT64(block & 0x8080808080808080ULL) >> 3);
+
+    auto full_slots =
+        static_cast<int>(CountLeadingZeros(block & kHighBitOfEachByte) >> 3);
     int full_slots_new[2];
     full_slots_new[0] = full_slots_new[1] = 0;
-    *reinterpret_cast<uint64_t*>(double_block_base_new) = 0x8080808080808080ULL;
+    *reinterpret_cast<uint64_t*>(double_block_base_new) = kHighBitOfEachByte;
     *reinterpret_cast<uint64_t*>(double_block_base_new + block_size_after) =
-        0x8080808080808080ULL;
+        kHighBitOfEachByte;
 
     for (int j = 0; j < full_slots; ++j) {
       uint64_t slot_id = i * 8 + j;
@@ -435,7 +421,7 @@ Status SwissTable::grow_double() {
     // How many full slots in this block
     uint8_t* block_base = blocks_ + i * block_size_before;
     uint64_t block = *reinterpret_cast<const uint64_t*>(block_base);
-    int full_slots = static_cast<int>(LZCNT64(block & 0x8080808080808080ULL) >> 3);
+    int full_slots = static_cast<int>(CountLeadingZeros(block & kHighBitOfEachByte) >> 3);
 
     for (int j = 0; j < full_slots; ++j) {
       uint64_t slot_id = i * 8 + j;
@@ -457,13 +443,13 @@ Status SwissTable::grow_double() {
       uint8_t* block_base_new = blocks_new + block_id_new * block_size_after;
       uint64_t block_new = *reinterpret_cast<const uint64_t*>(block_base_new);
       int full_slots_new =
-          static_cast<int>(LZCNT64(block_new & 0x8080808080808080ULL) >> 3);
+          static_cast<int>(CountLeadingZeros(block_new & kHighBitOfEachByte) >> 3);
       while (full_slots_new == 8) {
         block_id_new = (block_id_new + 1) & ((1 << log_blocks_after) - 1);
         block_base_new = blocks_new + block_id_new * block_size_after;
         block_new = *reinterpret_cast<const uint64_t*>(block_base_new);
         full_slots_new =
-            static_cast<int>(LZCNT64(block_new & 0x8080808080808080ULL) >> 3);
+            static_cast<int>(CountLeadingZeros(block_new & kHighBitOfEachByte) >> 3);
       }
 
       hashes_new[block_id_new * 8 + full_slots_new] = hash;
@@ -505,7 +491,7 @@ Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool*
 
   for (uint64_t i = 0; i < (static_cast<uint64_t>(1) << log_blocks_); ++i) {
     *reinterpret_cast<uint64_t*>(blocks_ + i * (8 + num_groupid_bits)) =
-        UINT64_C(0x8080808080808080);
+        kHighBitOfEachByte;
   }
 
   const uint64_t cbhashes = (sizeof(uint32_t) << num_groupid_bits) + padding_;
@@ -568,7 +554,8 @@ void SwissTable::precomputed_make() {
     for (int i = 0; i < (1 << log_blocks_); ++i) {
       uint8_t* block_base = blocks_ + i * (8 + num_group_id_bits);
       uint64_t block = *reinterpret_cast<const uint64_t*>(block_base);
-      int full_slots = static_cast<int>(LZCNT64(block & 0x8080808080808080ULL) >> 3);
+      int full_slots = static_cast<int>(
+          CountLeadingZeros(static_cast<uint64_t>(block & kHighBitOfEachByte)) >> 3);
       for (int j = 0; j < full_slots; ++j) {
         uint64_t group_id_bit_offs = j * num_group_id_bits;
         uint64_t group_id = (*reinterpret_cast<const uint64_t*>(

@@ -470,9 +470,10 @@ struct GrouperFastImpl : Grouper {
       impl->key_types_[i] = key;
     }
 
-    impl->group_map_.init(arrow::exec::util::CPUInstructionSet::avx2, ctx->memory_pool(),
-                          static_cast<uint32_t>(keys.size()), impl->is_fixedlen_,
-                          impl->col_widths_.data());
+    RETURN_NOT_OK(impl->group_map_.init(arrow::exec::util::CPUInstructionSet::avx2,
+                                        ctx->memory_pool(),
+                                        static_cast<uint32_t>(keys.size()),
+                                        impl->is_fixedlen_, impl->col_widths_.data()));
 
     return std::move(impl);
   }
@@ -500,10 +501,10 @@ struct GrouperFastImpl : Grouper {
     TypedBufferBuilder<uint32_t> group_ids_batch(ctx_->memory_pool());
     RETURN_NOT_OK(group_ids_batch.Resize(batch.length));
 
-    group_map_.push_input(static_cast<uint32_t>(num_rows),
-                          non_null_buffers_maybe_null_.data(), fixedlen_buffers_.data(),
-                          varlen_buffer_maybe_null_.data(),
-                          reinterpret_cast<uint32_t*>(group_ids->mutable_data()));
+    RETURN_NOT_OK(group_map_.push_input(
+        static_cast<uint32_t>(num_rows), non_null_buffers_maybe_null_.data(),
+        fixedlen_buffers_.data(), varlen_buffer_maybe_null_.data(),
+        reinterpret_cast<uint32_t*>(group_ids->mutable_data())));
 
     return Datum(UInt32Array(batch.length, std::move(group_ids)));
   }
@@ -515,9 +516,10 @@ struct GrouperFastImpl : Grouper {
   Result<ExecBatch> GetUniques() override {
     uint64_t num_groups;
     bool is_row_fixedlen;
-    uint32_t num_columns = static_cast<uint32_t>(col_widths_.size());
-    group_map_.pull_output_prepare(num_groups, is_row_fixedlen);
+    group_map_.pull_output_prepare(&num_groups, &is_row_fixedlen);
     ExecBatch out({}, num_groups);
+
+    auto num_columns = static_cast<uint32_t>(col_widths_.size());
     out.values.resize(num_columns);
 
     std::vector<std::shared_ptr<Buffer>> non_null_bufs;
