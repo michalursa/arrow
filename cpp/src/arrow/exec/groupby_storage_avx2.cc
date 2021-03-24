@@ -19,6 +19,7 @@
 
 #include "arrow/exec/common.h"
 #include "arrow/exec/groupby_storage.h"
+#include "arrow/util/bit_util.h"
 
 namespace arrow {
 namespace exec {
@@ -205,7 +206,7 @@ void KeyCompare::compare_fixedlen_avx2(uint32_t num_rows, uint32_t length,
           _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base_right) + istripe);
       cmp &= (mask_last |
               _mm256_movemask_epi8(_mm256_cmpeq_epi8(key_stripe_left, key_stripe_right)));
-      match |= (static_cast<uint64_t>(POPCNT64(cmp) >> 5) << (irow & 63));
+      match |= (static_cast<uint64_t>(arrow::BitUtil::PopCount(cmp) >> 5) << (irow & 63));
       if ((irow & 63) == 63) {
         reinterpret_cast<uint64_t*>(match_bitvector)[irow / 64] = match;
         match = 0ULL;

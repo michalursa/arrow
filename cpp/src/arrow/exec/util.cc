@@ -17,25 +17,12 @@
 
 #include "arrow/exec/util.h"
 
+#include "arrow/util/bit_util.h"
+#include "arrow/util/bitmap_ops.h"
+
 namespace arrow {
 namespace exec {
 namespace util {
-
-int BitUtil::popcnt_bitvector(const int num_bits, const uint8_t* bits) {
-  constexpr int unroll = 64;
-  int count = 0;
-  for (int i = 0; i < num_bits / unroll; ++i) {
-    uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
-    count += static_cast<int>(POPCNT64(word));
-  }
-  int tail = num_bits % unroll;
-  if (tail) {
-    uint64_t word = reinterpret_cast<const uint64_t*>(bits)[num_bits / unroll];
-    word &= ~0ULL >> (64 - tail);
-    count += static_cast<int>(POPCNT64(word));
-  }
-  return count;
-}
 
 inline void BitUtil::bits_to_indexes_helper(uint64_t word, uint16_t base_index,
                                             int& num_indexes, uint16_t* indexes) {
@@ -44,6 +31,7 @@ inline void BitUtil::bits_to_indexes_helper(uint64_t word, uint16_t base_index,
     word &= word - 1;
   }
 }
+
 inline void BitUtil::bits_filter_indexes_helper(uint64_t word,
                                                 const uint16_t* input_indexes,
                                                 int& num_indexes, uint16_t* indexes) {
