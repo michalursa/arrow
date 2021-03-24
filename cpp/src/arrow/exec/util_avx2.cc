@@ -19,6 +19,7 @@
 
 #include "arrow/exec/common.h"
 #include "arrow/exec/util.h"
+#include "arrow/util/bit_util.h"
 
 namespace arrow {
 namespace exec {
@@ -52,7 +53,7 @@ void BitUtil::bits_to_indexes_avx2(const int num_bits, const uint8_t* bits,
           _pext_u64(mask, _pdep_u64(word, UINT64_C(0X0101010101010101)) * 0xff) + base;
       *reinterpret_cast<uint64_t*>(byte_indexes + num_indexes_loop) = byte_indexes_next;
       base += incr;
-      num_indexes_loop += static_cast<int>(POPCNT64(word & 0xff));
+      num_indexes_loop += static_cast<int>(arrow::BitUtil::PopCount(word & 0xff));
       word >>= 8;
     }
     // Unpack indexes to 16-bits and either add the base of i * 64 or shuffle input
@@ -122,7 +123,7 @@ void BitUtil::bits_filter_indexes_avx2(const int num_bits, const uint8_t* bits,
           output, _mm256_setr_epi64x(0x0b030a0209010800ULL, 0x0f070e060d050c04ULL,
                                      0x0b030a0209010800ULL, 0x0f070e060d050c04ULL));
       _mm256_storeu_si256((__m256i*)(indexes + num_indexes), output);
-      num_indexes += static_cast<int>(POPCNT64(word & 0xffff));
+      num_indexes += static_cast<int>(arrow::BitUtil::PopCount(word & 0xffff));
       word >>= 16;
       ++loop_id;
     }

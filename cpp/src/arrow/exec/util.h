@@ -20,23 +20,21 @@
 #include <cstdint>
 #include <vector>
 
+#include "arrow/exec/common.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/logging.h"
-#include "arrow/exec/common.h"
 
 #if defined(__clang__) || defined(__GNUC__)
 #define LZCNT64(x) __builtin_clzll(x)
 #define TZCNT64(x) __builtin_ctzll(x)
-#define POPCNT64(x) __builtin_popcountll(x)
 #define BYTESWAP(x) __builtin_bswap64(x)
 #define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 #elif defined(_MSC_VER)
 #include <intrin.h>
 #define LZCNT64(x) __lzcnt64(x)
 #define TZCNT64(x) _tzcnt_u64(x)
-#define POPCNT64(x) __popcnt64(x)
 #define BYTESWAP(x) _byteswap_uint64(x)
 #define ROTL(x, n) _rotl((x), (n))
 #endif
@@ -140,8 +138,6 @@ class TempBuffer {
 
 class BitUtil {
  public:
-  static int popcnt_bitvector(const int num_bits, const uint8_t* bits);
-
   template <int bit_to_search = 1>
   static void bits_to_indexes(CPUInstructionSet instruction_set, const int num_bits,
                               const uint8_t* bits, int& num_indexes, uint16_t* indexes);

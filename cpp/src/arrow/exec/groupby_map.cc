@@ -24,6 +24,7 @@
 #include <cstdint>
 
 #include "arrow/exec/common.h"
+#include "arrow/util/bitmap_ops.h"
 
 namespace arrow {
 namespace exec {
@@ -315,7 +316,8 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
         break;
     }
 
-    int num_matches = util::BitUtil::popcnt_bitvector(num_keys, match_bitvector);
+    int64_t num_matches =
+        arrow::internal::CountSetBits(match_bitvector, /*offset=*/0, num_keys);
 
     // after first pass count rows with matches and decide based on their percentage
     // whether to call dense or sparse comparison function
@@ -343,7 +345,8 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
 
   do {
     bool out_of_capacity;
-    RETURN_NOT_OK(lookup_2(hashes, num_ids, ids, out_of_capacity, out_groupids, slot_ids));
+    RETURN_NOT_OK(
+        lookup_2(hashes, num_ids, ids, out_of_capacity, out_groupids, slot_ids));
     if (out_of_capacity) {
       RETURN_NOT_OK(grow_double());
       // Set slot_ids for selected vectors to first slot in new initial block.
