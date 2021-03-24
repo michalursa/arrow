@@ -27,14 +27,10 @@
 #include "arrow/util/logging.h"
 
 #if defined(__clang__) || defined(__GNUC__)
-#define LZCNT64(x) __builtin_clzll(x)
-#define TZCNT64(x) __builtin_ctzll(x)
 #define BYTESWAP(x) __builtin_bswap64(x)
 #define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 #elif defined(_MSC_VER)
 #include <intrin.h>
-#define LZCNT64(x) __lzcnt64(x)
-#define TZCNT64(x) _tzcnt_u64(x)
 #define BYTESWAP(x) _byteswap_uint64(x)
 #define ROTL(x, n) _rotl((x), (n))
 #endif

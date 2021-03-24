@@ -82,12 +82,12 @@ Status GroupMap::append_callback(int num_keys, const uint16_t* selection) {
       minibatch_rows.data(), minibatch_nulls.data());
 }
 
-void GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool,
-                    uint32_t num_columns, const std::vector<bool>& is_fixed_len_in,
-                    const uint32_t* col_widths_in) {
+Status GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool,
+                      uint32_t num_columns, const std::vector<bool>& is_fixed_len_in,
+                      const uint32_t* col_widths_in) {
   memory_pool = pool;
   minibatch_size = minibatch_size_min;
-  temp_buffers.init(memory_pool, minibatch_size_max);
+  RETURN_NOT_OK(temp_buffers.init(memory_pool, minibatch_size_max));
   instruction_set = instruction_set_in;
 
   bool is_row_fixed_len = true;
@@ -105,8 +105,8 @@ void GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool
     }
   }
 
-  key_store.init(instruction_set, memory_pool, num_columns, is_row_fixed_len,
-                 fixed_len_size);
+  RETURN_NOT_OK(key_store.init(instruction_set, memory_pool, num_columns,
+                               is_row_fixed_len, fixed_len_size));
   auto equal_func = [this](int num_keys_to_compare,
                            const uint16_t* selection_may_be_null /* may be null */,
                            const uint32_t* group_ids, uint8_t* match_bitvector) {
@@ -117,8 +117,8 @@ void GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool
     return this->append_callback(num_keys, selection);
   };
 
-  group_id_map.init(instruction_set, memory_pool, &temp_buffers, log_minibatch_max,
-                    equal_func, append_func);
+  RETURN_NOT_OK(group_id_map.init(instruction_set, memory_pool, &temp_buffers,
+                                  log_minibatch_max, equal_func, append_func));
 
   col_non_nulls.resize(key_store.get_num_cols());
   col_offsets.resize(key_store.get_num_cols());
@@ -148,12 +148,14 @@ void GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* pool
       KeyStore::padding_for_SIMD);
   minibatch_offsets.resize((minibatch_size_max + 1) +
                            KeyStore::padding_for_SIMD / sizeof(uint32_t));
+  return Status::OK();
 }
 
-void GroupMap::push_input(uint32_t num_rows, const uint8_t** non_null_buffers_maybe_null,
-                          const uint8_t** fixedlen_values_buffers,
-                          const uint8_t** varlen_buffers_maybe_null,
-                          uint32_t* group_ids) {
+Status GroupMap::push_input(uint32_t num_rows,
+                            const uint8_t** non_null_buffers_maybe_null,
+                            const uint8_t** fixedlen_values_buffers,
+                            const uint8_t** varlen_buffers_maybe_null,
+                            uint32_t* group_ids) {
   uint32_t num_columns = key_store.get_num_cols();
 
   bool fixed_len_row = true;
@@ -280,18 +282,21 @@ void GroupMap::push_input(uint32_t num_rows, const uint8_t** non_null_buffers_ma
     }
 
     // Map
-    group_id_map.map(curr_minibatch_size, minibatch_hashes.data(), group_ids + irow0);
+    RETURN_NOT_OK(group_id_map.map(curr_minibatch_size, minibatch_hashes.data(),
+                                   group_ids + irow0));
 
     irow0 += curr_minibatch_size;
     if (minibatch_size * 2 <= minibatch_size_max) {
       minibatch_size *= 2;
     }
   }
+
+  return Status::OK();
 }
 
-void GroupMap::pull_output_prepare(uint64_t& out_num_rows, bool& out_is_row_fixedlen) {
-  out_num_rows = key_store.get_num_keys();
-  out_is_row_fixedlen = key_store.is_row_fixedlen();
+void GroupMap::pull_output_prepare(uint64_t* out_num_rows, bool* out_is_row_fixedlen) {
+  *out_num_rows = key_store.get_num_keys();
+  *out_is_row_fixedlen = key_store.is_row_fixedlen();
 }
 
 void GroupMap::pull_output_fixedlen_and_nulls(uint8_t** non_null_buffers,
@@ -332,11 +337,11 @@ void GroupMap::pull_output_fixedlen_and_nulls(uint8_t** non_null_buffers,
     arrow::exec::KeyTranspose::row2col(
         instruction_set, false, key_store.get_num_cols(), curr_minibatch_size,
         col_widths.data(), out_col_non_nulls.data(), out_col_offsets.data(),
-        out_col_values.data(), 
+        out_col_values.data(),
         key_store.is_row_fixedlen() ? &row_length : row_offsets + irow0,
-        key_store.is_row_fixedlen() ? row_vals + row_length * irow0 : row_vals, 
-        row_nulls + (irow0 << log_row_null_bits) / 8, 
-        minibatch_size_max, minibatch_temp.data(),
+        key_store.is_row_fixedlen() ? row_vals + row_length * irow0 : row_vals,
+        row_nulls + (irow0 << log_row_null_bits) / 8, minibatch_size_max,
+        minibatch_temp.data(),
         minibatch_temp.data() + minibatch_size_max +
             KeyStore::padding_for_SIMD / sizeof(uint32_t));
 
@@ -350,7 +355,8 @@ void GroupMap::pull_output_fixedlen_and_nulls(uint8_t** non_null_buffers,
     if (is_col_fixed_len[icol]) {
       out_varlen_buffer_sizes[icol] = 0;
     } else {
-      out_varlen_buffer_sizes[icol] = reinterpret_cast<const uint32_t*>(fixedlen_buffers[icol])[num_rows];
+      out_varlen_buffer_sizes[icol] =
+          reinterpret_cast<const uint32_t*>(fixedlen_buffers[icol])[num_rows];
     }
   }
 }
@@ -373,7 +379,8 @@ void GroupMap::pull_output_varlen(uint8_t** non_null_buffers, uint8_t** fixedlen
     for (uint32_t icol = 0; icol < key_store.get_num_cols(); ++icol) {
       out_col_non_nulls[icol] = non_null_buffers[icol] + irow0 / 8;
       out_col_offsets[icol] = reinterpret_cast<uint32_t*>(
-          is_col_fixed_len[icol] ? nullptr : fixedlen_buffers[icol] + sizeof(uint32_t) * irow0);
+          is_col_fixed_len[icol] ? nullptr
+                                 : fixedlen_buffers[icol] + sizeof(uint32_t) * irow0);
       out_col_values[icol] =
           is_col_fixed_len[icol] ? nullptr : varlen_buffers_maybe_null[icol];
     }
@@ -381,11 +388,11 @@ void GroupMap::pull_output_varlen(uint8_t** non_null_buffers, uint8_t** fixedlen
     arrow::exec::KeyTranspose::row2col(
         instruction_set, true, key_store.get_num_cols(), curr_minibatch_size,
         col_widths.data(), out_col_non_nulls.data(), out_col_offsets.data(),
-        out_col_values.data(), 
+        out_col_values.data(),
         key_store.is_row_fixedlen() ? &row_length : row_offsets + irow0,
-        key_store.is_row_fixedlen() ? row_vals + row_length * irow0 : row_vals, 
-        row_nulls + (irow0 << log_row_null_bits) / 8, 
-        minibatch_size_max, minibatch_temp.data(),
+        key_store.is_row_fixedlen() ? row_vals + row_length * irow0 : row_vals,
+        row_nulls + (irow0 << log_row_null_bits) / 8, minibatch_size_max,
+        minibatch_temp.data(),
         minibatch_temp.data() + minibatch_size_max +
             KeyStore::padding_for_SIMD / sizeof(uint32_t));
 

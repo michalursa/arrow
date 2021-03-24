@@ -19,11 +19,11 @@
 
 #include <functional>
 
+#include "arrow/exec/common.h"
+#include "arrow/exec/util.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
 
 class SwissTableSimple;
 
@@ -45,13 +45,7 @@ class SwissTable {
   friend class ::SwissTableSimple;
 
  public:
-  SwissTable()
-      : log_blocks_(0),
-        num_inserted_(0),
-        blocks_(),
-        hashes_(),
-        pool_(),
-        temp_buffers_() {}
+  SwissTable() = default;
   ~SwissTable() { cleanup(); }
 
   using EqualImpl =
@@ -68,12 +62,41 @@ class SwissTable {
 
  private:
   // Lookup helpers
+
+  /// \brief Scan bytes in block in reverse and stop as soon
+  /// as a position of interest is found.
+  ///
+  /// Positions of interest:
+  /// a) slot with a matching stamp is encountered,
+  /// b) first empty slot is encountered,
+  /// c) we reach the end of the block.
+  ///
+  /// \param[in] block 8 byte block of hash table
+  /// \param[in] stamp 7 bits of hash used as a stamp
+  /// \param[in] start_slot Index of the first slot in the block to start search from.  We
+  ///            assume that this index always points to a non-empty slot, equivalently
+  ///            that it comes before any empty slots.  (Used only by one template
+  ///            variant.)
+  /// \param[out] out_slot index corresponding to the discovered position of interest (8
+  ///            represents end of block).
+  /// \param[out] out_match_found an integer flag (0 or 1) indicating if we found a
+  ///            matching stamp.
   template <bool use_start_slot>
-  inline void search_block(uint64_t block, int stamp, int start_slot, int& out_slot,
-                           int& out_match_found);
+  inline void search_block(uint64_t block, int stamp, int start_slot, int* out_slot,
+                           int* out_match_found);
+
+  /// \brief Extract group id for a given slot in a given block.
+  ///
+  /// Group ids follow in memory after 64-bit block data.
+  /// Maximum number of groups inserted is equal to the number
+  /// of all slots in all blocks, which is 8 * the number of blocks.
+  /// Group ids are bit packed using that maximum to determine the necessary number of
+  /// bits.
   inline uint64_t extract_group_id(const uint8_t* block_ptr, int slot,
                                    uint64_t group_id_mask);
+
   inline uint64_t next_slot_to_visit(uint64_t block_index, int slot, int match_found);
+
   inline void insert(uint8_t* block_base, uint64_t slot_id, uint32_t hash, uint8_t stamp,
                      uint32_t group_id);
 
@@ -120,9 +143,9 @@ class SwissTable {
 
   int log_minibatch_;
   // Base 2 log of the number of blocks
-  int log_blocks_;
+  int log_blocks_ = 0;
   // Number of keys inserted into hash table
-  uint32_t num_inserted_;
+  uint32_t num_inserted_ = 0;
 
   // Data for blocks.
   // Each block has 8x of onse byte stamp slots, followed by 8x of bit packed group ids.
