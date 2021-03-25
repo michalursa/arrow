@@ -204,7 +204,6 @@ Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
       hashes_[slot_id] = hash;
       out_group_ids[id] = group_id;
       push_id(category_inserted, id);
-      precomputed_insert(hash, group_id, slot_id);
     } else {
       int new_match_found;
       int new_slot;
@@ -273,59 +272,54 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
   uint16_t* ids = ids_buf.mutable_data();
   int num_ids;
 
-  if (num_inserted_ > 0 && precomputed_available()) {
-    precomputed_lookup(num_keys, hashes, out_groupids, slot_ids, num_ids, ids,
-                       match_bitvector);
-  } else {
-    switch (cpu_instruction_set_) {
-      case util::CPUInstructionSet::scalar:
-        lookup_1<false>(nullptr, num_keys, hashes, match_bitvector, out_groupids,
-                        slot_ids);
-        break;
+  switch (cpu_instruction_set_) {
+    case util::CPUInstructionSet::scalar:
+      lookup_1<false>(nullptr, num_keys, hashes, match_bitvector, out_groupids,
+                      slot_ids);
+      break;
 #if defined(ARROW_HAVE_AVX2)
-      case util::CPUInstructionSet::avx2:
-        if (log_blocks_ <= 4) {
-          int tail = num_keys % 32;
-          int delta = num_keys - tail;
-          lookup_1_avx2_x32(num_keys - tail, hashes, match_bitvector, out_groupids,
-                            slot_ids);
-          lookup_1_avx2_x8(tail, hashes + delta, match_bitvector + delta / 8,
-                           out_groupids + delta, slot_ids + delta);
-        } else {
-          lookup_1_avx2_x8(num_keys, hashes, match_bitvector, out_groupids, slot_ids);
-        }
-        break;
+    case util::CPUInstructionSet::avx2:
+      if (log_blocks_ <= 4) {
+        int tail = num_keys % 32;
+        int delta = num_keys - tail;
+        lookup_1_avx2_x32(num_keys - tail, hashes, match_bitvector, out_groupids,
+                          slot_ids);
+        lookup_1_avx2_x8(tail, hashes + delta, match_bitvector + delta / 8,
+                          out_groupids + delta, slot_ids + delta);
+      } else {
+        lookup_1_avx2_x8(num_keys, hashes, match_bitvector, out_groupids, slot_ids);
+      }
+      break;
 #endif
-      default:
-        break;
-    }
+    default:
+      break;
+  }
 
-    int64_t num_matches =
-        arrow::internal::CountSetBits(match_bitvector, /*offset=*/0, num_keys);
+  int64_t num_matches =
+      arrow::internal::CountSetBits(match_bitvector, /*offset=*/0, num_keys);
 
-    // after first pass count rows with matches and decide based on their percentage
-    // whether to call dense or sparse comparison function
-    //
+  // after first pass count rows with matches and decide based on their percentage
+  // whether to call dense or sparse comparison function
+  //
 
-    // TODO: explain num_inserted_ > 0 condition below
-    if (num_inserted_ > 0 && num_matches > 0 && num_matches > 3 * num_keys / 4) {
-      equal_impl_(num_keys, nullptr, out_groupids, match_bitvector);
-      util::BitUtil::bits_to_indexes<0>(cpu_instruction_set_, num_keys, match_bitvector,
-                                        num_ids, ids);
-    } else {
-      util::TempBuffer<uint16_t> ids_cmp_buf(temp_buffers_);
-      RETURN_NOT_OK(ids_cmp_buf.alloc());
-      uint16_t* ids_cmp = ids_cmp_buf.mutable_data();
-      util::BitUtil::bits_split_indexes(cpu_instruction_set_, num_keys, match_bitvector,
-                                        num_ids, ids, ids_cmp);
-      equal_impl_(num_keys - num_ids, ids_cmp, out_groupids, match_bitvector);
-      int num_not_equal;
-      util::BitUtil::bits_filter_indexes<0>(cpu_instruction_set_, num_keys - num_ids,
-                                            match_bitvector, ids_cmp, num_not_equal,
-                                            ids + num_ids);
-      num_ids += num_not_equal;
-    }
-  }  // precomputed_available()
+  // TODO: explain num_inserted_ > 0 condition below
+  if (num_inserted_ > 0 && num_matches > 0 && num_matches > 3 * num_keys / 4) {
+    equal_impl_(num_keys, nullptr, out_groupids, match_bitvector);
+    util::BitUtil::bits_to_indexes<0>(cpu_instruction_set_, num_keys, match_bitvector,
+                                      num_ids, ids);
+  } else {
+    util::TempBuffer<uint16_t> ids_cmp_buf(temp_buffers_);
+    RETURN_NOT_OK(ids_cmp_buf.alloc());
+    uint16_t* ids_cmp = ids_cmp_buf.mutable_data();
+    util::BitUtil::bits_split_indexes(cpu_instruction_set_, num_keys, match_bitvector,
+                                      num_ids, ids, ids_cmp);
+    equal_impl_(num_keys - num_ids, ids_cmp, out_groupids, match_bitvector);
+    int num_not_equal;
+    util::BitUtil::bits_filter_indexes<0>(cpu_instruction_set_, num_keys - num_ids,
+                                          match_bitvector, ids_cmp, num_not_equal,
+                                          ids + num_ids);
+    num_ids += num_not_equal;
+  }
 
   do {
     bool out_of_capacity;
@@ -466,8 +460,6 @@ Status SwissTable::grow_double() {
   blocks_ = blocks_new;
   hashes_ = hashes_new;
 
-  precomputed_make();
-
   return Status::OK();
 }
 
@@ -499,8 +491,6 @@ Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool*
   RETURN_NOT_OK(pool_->Allocate(cbhashes, &hashes8));
   hashes_ = reinterpret_cast<uint32_t*>(hashes8);
 
-  precomputed_clear();
-
   return Status::OK();
 }
 
@@ -518,75 +508,6 @@ void SwissTable::cleanup() {
   }
   log_blocks_ = 0;
   num_inserted_ = 0;
-}
-
-inline bool SwissTable::precomputed_available() const { return log_blocks_ + 3 <= 8; }
-
-inline void SwissTable::precomputed_insert(uint32_t hash, uint32_t group_id,
-                                           uint64_t slot_id) {
-  if (precomputed_available()) {
-    int pos = hash >> (bits_hash_ - log_blocks_ - 4);
-    if (precomputed_group_ids[pos] == 0x80) {
-      precomputed_group_ids[pos] = static_cast<uint8_t>(group_id & 0xff);
-      precomputed_slot_ids[pos] = static_cast<uint8_t>((slot_id + 1) & 0xff);
-    }
-  }
-}
-
-void SwissTable::precomputed_clear() {
-  if (precomputed_available()) {
-    precomputed_group_ids.resize(1ULL << (log_blocks_ + 4));
-    precomputed_slot_ids.resize(1ULL << (log_blocks_ + 4));
-    memset(precomputed_group_ids.data(), 0x80, (1ULL << (log_blocks_ + 4)));
-    for (int i = 0; i < (1 << log_blocks_); ++i) {
-      for (int j = 0; j < 16; ++j) {
-        precomputed_slot_ids[i * 16 + j] = i * 8;
-      }
-    }
-  }
-}
-
-void SwissTable::precomputed_make() {
-  if (precomputed_available()) {
-    precomputed_clear();
-    uint32_t num_group_id_bits = log_blocks_ + 3;
-    uint64_t group_id_mask = ~0ULL >> (64 - num_group_id_bits);
-    for (int i = 0; i < (1 << log_blocks_); ++i) {
-      uint8_t* block_base = blocks_ + i * (8 + num_group_id_bits);
-      uint64_t block = *reinterpret_cast<const uint64_t*>(block_base);
-      int full_slots = static_cast<int>(
-          CountLeadingZeros(static_cast<uint64_t>(block & kHighBitOfEachByte)) >> 3);
-      for (int j = 0; j < full_slots; ++j) {
-        uint64_t group_id_bit_offs = j * num_group_id_bits;
-        uint64_t group_id = (*reinterpret_cast<const uint64_t*>(
-                                 block_base + 8 + (group_id_bit_offs >> 3)) >>
-                             (group_id_bit_offs & 7)) &
-                            group_id_mask;
-        uint32_t slot_id = i * 8 + j;
-        uint32_t hash = hashes_[slot_id];
-        precomputed_insert(hash, static_cast<uint32_t>(group_id), slot_id);
-      }
-    }
-  }
-}
-
-void SwissTable::precomputed_lookup(int num_rows, const uint32_t* hashes,
-                                    uint32_t* group_ids, uint32_t* slot_ids,
-                                    int& num_mismatch_ids, uint16_t* mismatch_ids,
-                                    uint8_t* temp_bitvector) {
-  if (precomputed_available()) {
-    for (int i = 0; i < num_rows; ++i) {
-      group_ids[i] =
-          precomputed_group_ids[hashes[i] >> (bits_hash_ - log_blocks_ - 4)] & 0x7f;
-    }
-    equal_impl_(num_rows, nullptr, group_ids, temp_bitvector);
-    util::BitUtil::bits_to_indexes<0>(cpu_instruction_set_, num_rows, temp_bitvector,
-                                      num_mismatch_ids, mismatch_ids);
-    for (int i = 0; i < num_mismatch_ids; ++i) {
-      int id = mismatch_ids[i];
-      slot_ids[id] = precomputed_slot_ids[hashes[id] >> (bits_hash_ - log_blocks_ - 4)];
-    }
-  }
 }
 
 }  // namespace exec

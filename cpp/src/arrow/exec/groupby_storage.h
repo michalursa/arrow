@@ -25,8 +25,6 @@
 #include "arrow/exec/common.h"
 #include "arrow/exec/util.h"
 
-#define AGGREGATES_STORED_SEPARATELY
-
 namespace arrow {
 namespace exec {
 

@@ -150,7 +150,7 @@ void KeyCompare::compare_varlen_avx2(uint32_t num_rows, const uint32_t* offsets_
           istripe);
       uint32_t cmp_bits =
           _mm256_movemask_epi8(_mm256_cmpeq_epi8(key_stripe_left, key_stripe_right));
-      if (cmp_bits != (~0UL)) {
+      if (cmp_bits != static_cast<uint32_t>(~0UL)) {
         result = 0;
         break;
       }
@@ -164,7 +164,7 @@ void KeyCompare::compare_varlen_avx2(uint32_t num_rows, const uint32_t* offsets_
           istripe);
       uint32_t cmp_bits =
           _mm256_movemask_epi8(_mm256_cmpeq_epi8(key_stripe_left, key_stripe_right));
-      uint32_t mask = (~0UL >> (32 - (((length - 1) % 32) + 1)));
+      uint32_t mask = (static_cast<uint32_t>(~0UL) >> (32 - (((length - 1) % 32) + 1)));
       if ((cmp_bits & mask) != mask) {
         result = 0;
       }

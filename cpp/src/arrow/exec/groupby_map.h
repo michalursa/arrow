@@ -165,16 +165,6 @@ class SwissTable {
   AppendImpl append_impl_;
 
   util::CPUInstructionSet cpu_instruction_set_;
-
-  bool precomputed_available() const;
-  void precomputed_insert(uint32_t hash, uint32_t group_id, uint64_t slot_id);
-  void precomputed_clear();
-  void precomputed_make();
-  void precomputed_lookup(int num_rows, const uint32_t* hashes, uint32_t* group_ids,
-                          uint32_t* slot_ids, int& num_mismatch_ids,
-                          uint16_t* mismatch_ids, uint8_t* temp_bitvector);
-  std::vector<uint8_t> precomputed_group_ids;
-  std::vector<uint8_t> precomputed_slot_ids;
 };
 
 }  // namespace exec
