@@ -396,6 +396,7 @@ if(ARROW_COMPUTE)
               exec/groupby_hash.cc
               exec/groupby_map.cc
               exec/groupby_storage.cc
+              exec/key_encode.cc              
               exec/groupby.cc
               exec/util.cc)
 
@@ -419,6 +420,11 @@ if(ARROW_COMPUTE)
     set_source_files_properties(exec/groupby_storage_avx2.cc PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON)
     set_source_files_properties(exec/groupby_storage_avx2.cc PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+    list(APPEND ARROW_SRCS exec/key_encode_avx2.cc)
+    set_source_files_properties(exec/key_encode_avx2.cc PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(exec/key_encode_avx2.cc PROPERTIES
                                 COMPILE_FLAGS ${ARROW_AVX2_FLAG})
     list(APPEND ARROW_SRCS exec/util_avx2.cc)
     set_source_files_properties(exec/util_avx2.cc PROPERTIES

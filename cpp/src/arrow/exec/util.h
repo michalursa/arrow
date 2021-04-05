@@ -25,6 +25,7 @@
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/logging.h"
+#include "arrow/buffer.h"
 
 #if defined(__clang__) || defined(__GNUC__)
 #define BYTESWAP(x) __builtin_bswap64(x)
@@ -43,6 +44,67 @@ enum class CPUInstructionSet {
   scalar,
   avx2,   // All of: AVX2, BMI2
   avx512  // In addition to avx2, all of: AVX512-F, AVX512-BW, AVX512-DQ, AVX512-CD
+};
+
+/// Storage used to allocate temporary vectors of a batch size.
+/// Temporary vectors should resemble allocating temporary variables on the stack
+/// but in the context of vectorized processing where we need to store a vector of 
+/// temporaries instead of a single value.
+// TODO: Change to vector of exactly 32KB pages?
+class TempVectorStack {
+  template<typename> friend class TempVectorHolder;
+public:
+  Status Init(MemoryPool* pool, int64_t size) {
+    pool_ = pool;
+    num_vectors_ = 0;
+    top_ = 0;
+    buffer_size_ = size;
+    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(size, pool_));
+    buffer_ = std::move(buffer);
+    return Status::OK();
+  }
+private:
+  void alloc(uint32_t num_bytes, uint8_t* &data, int &id) {
+    int64_t old_top = top_;
+    top_ += num_bytes + padding;
+    // Stack overflow check
+    ARROW_DCHECK(top_ <= buffer_size_);
+    data = buffer_->mutable_data() + old_top;
+    id = num_vectors_++;
+  }
+  void release(int id, uint32_t num_bytes) {
+    ARROW_DCHECK(num_vectors_ == id + 1);
+    int64_t size = num_bytes + padding;
+    ARROW_DCHECK(top_ >= size);
+    top_ -= size;
+    --num_vectors_;
+  }
+  static constexpr int64_t padding = 64;
+  MemoryPool* pool_;
+  int num_vectors_;
+  int64_t top_;
+  std::unique_ptr<ResizableBuffer> buffer_;
+  int64_t buffer_size_;
+};
+
+template<typename T>
+class TempVectorHolder {
+  friend class TempVectorStack;
+public:
+  ~TempVectorHolder() {
+    stack_->release(id_, num_elements_ * sizeof(T));
+  }
+  uint8_t* mutable_data() { return data_; }
+  TempVectorHolder(TempVectorStack* stack, uint32_t num_elements) {
+    stack_ = stack;
+    num_elements_ = num_elements;
+    stack_->alloc(num_elements * sizeof(T), data_, id_);
+  }
+private:
+  TempVectorStack* stack_;
+  uint8_t* data_;
+  int id_;
+  uint32_t num_elements_;
 };
 
 class TempBufferAlloc {

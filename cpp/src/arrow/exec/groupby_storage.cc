@@ -204,7 +204,7 @@ Status KeyStore::append(uint32_t num_rows, const uint16_t* selection,
       new_rows_size += length;
     }
   }
-  resize_buffers_if_needed(num_rows, new_rows_size);
+  RETURN_NOT_OK(resize_buffers_if_needed(num_rows, new_rows_size));
 
   // Copy values
   if (is_row_fixedlen_) {
@@ -554,7 +554,6 @@ void KeyLength::compute_offsets(util::CPUInstructionSet instruction_set, int num
                                 const uint32_t** offsets, const uint8_t** non_nulls,
                                 const uint8_t* any_nulls_bitvector,
                                 uint32_t* row_offsets) {
-  constexpr int unroll_avx2 = 8;
   int64_t offset_max =
       static_cast<int64_t>(row_fixed_len) * static_cast<int64_t>(num_rows);
   for (int col = 0; col < num_columns; ++col) {
@@ -568,6 +567,7 @@ void KeyLength::compute_offsets(util::CPUInstructionSet instruction_set, int num
   int num_processed = 0;
 #if defined(ARROW_HAVE_AVX2)
   if (instruction_set == util::CPUInstructionSet::avx2 && (offset_max >> 32) == 0) {
+    constexpr int unroll_avx2 = 8;
     int tail = num_rows % unroll_avx2;
     compute_offsets_avx2(num_columns, num_rows - tail, row_fixed_len, offsets, non_nulls,
                          any_nulls_bitvector, row_offsets);
