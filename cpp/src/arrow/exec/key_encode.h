@@ -19,13 +19,13 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
-#include "arrow/buffer.h"
-#include "common.h"
-#include "util.h"
+#include "arrow/exec/common.h"
+#include "arrow/exec/util.h"
 
 namespace arrow {
 namespace exec {
@@ -47,6 +47,9 @@ class KeyEncoder {
 
   /// Description of a storage format for rows produced by encoder.
   struct KeyRowMetadata {
+    uint32_t get_num_varbinary_cols() const {
+      return cumulative_lengths_length / sizeof(uint32_t);
+    }
     /// Is row a varying-length binary, using offsets array to find a beginning of a row,
     /// or is it a fixed-length binary.
     bool is_fixed_length;
@@ -142,6 +145,10 @@ class KeyEncoder {
     /// Metadata is inherited from the first input.
     KeyColumnArray(const KeyColumnMetadata& metadata, const KeyColumnArray& left,
                    const KeyColumnArray& right, int buffer_id_to_replace);
+    /// Create for reading
+    KeyColumnArray(const KeyColumnMetadata& metadata, int64_t length,
+                   const uint8_t* buffer0, const uint8_t* buffer1,
+                   const uint8_t* buffer2);
     /// Create for writing
     KeyColumnArray(const KeyColumnMetadata& metadata, int64_t length, uint8_t* buffer0,
                    uint8_t* buffer1, uint8_t* buffer2);
@@ -175,28 +182,64 @@ class KeyEncoder {
     int64_t length_;
   };
 
-  /*
-      void PrepareMetadata(
-          std::vector<KeyColumMetdata>& col_metadata,
-          KeyRowMetadata* out_row_metadata);
+  void Init(const std::vector<KeyColumnMetadata>& cols, KeyEncoderContext* ctx);
 
-      void PrepareKeyColumnArrays(
-          const std::vector<KeyColumnArray>& cols_in,
-          std::vector<KeyColumnArray>* out_cols,
-          std::vector<KeyColumnArray>* out_varbinary_cols);
+  const KeyRowMetadata& get_row_metadata() { return row_metadata_; }
 
-      void GetOutputBufferSizesForEncode();
-          const KeyRowMetadata& row_metadata,
-          const std::vector<KeyColumnArray>& varbinary_cols,
-          int64_t* out_num_rows_required,
-          int64_t* out_num_bytes_required);
-  */
+  /// Find out the required sizes of all buffers output buffers for encoding
+  /// (including varying-length buffers).
+  /// Use that information to resize provided row array so that it can fit
+  /// encoded data.
+  Status PrepareOutputForEncode(int64_t start_input_row, int64_t num_input_rows,
+                                KeyRowArray& rows,
+                                const std::vector<KeyColumnArray>& all_cols);
 
-  void Encode();
+  /// Encode a window of column oriented data into the entire output
+  /// row oriented storage.
+  /// The output buffers for encoding need to be correctly sized before
+  /// starting encoding.
+  void Encode(int64_t start_input_row, int64_t num_input_rows, KeyRowArray& rows,
+              const std::vector<KeyColumnArray>& cols);
 
-  void Decode();
+  /// Decode a window of row oriented data into a corresponding
+  /// window of column oriented storage.
+  /// The output buffers need to be correctly allocated and sized before
+  /// calling each method.
+  /// For that reason decoding is split into two functions.
+  /// The output of the first one, that processes everything except for
+  /// varying length buffers, can be used to find out required varying
+  /// length buffers sizes.
+  void DecodeFixedLengthBuffers(int64_t start_row_input, int64_t start_row_output,
+                                int64_t num_rows, const KeyRowArray& rows,
+                                std::vector<KeyColumnArray>& cols);
+
+  void DecodeVaryingLengthBuffers(int64_t start_row_input, int64_t start_row_output,
+                                  int64_t num_rows, const KeyRowArray& rows,
+                                  std::vector<KeyColumnArray>& cols);
 
  private:
+  void PrepareMetadata(const std::vector<KeyColumnMetadata>& col_metadata,
+                       KeyRowMetadata* out_row_metadata);
+
+  /// Prepare column array vectors.
+  /// Output column arrays represent a range of input column arrays
+  /// specified by starting row and number of rows.
+  /// Three vectors are generated:
+  /// - all columns
+  /// - fixed-length columns only
+  /// - varying-length columns only
+  void PrepareKeyColumnArrays(int64_t start_row, int64_t num_rows,
+                              const std::vector<KeyColumnArray>& cols_in,
+                              std::vector<KeyColumnArray>* out_all_cols,
+                              std::vector<KeyColumnArray>* out_fixedbinary_cols,
+                              std::vector<KeyColumnArray>* out_varbinary_cols,
+                              std::vector<uint32_t>* batch_varbinary_cols_base_offsets);
+
+  void GetOutputBufferSizeForEncode(int64_t start_row, int64_t num_rows,
+                                    const KeyRowMetadata& row_metadata,
+                                    const std::vector<KeyColumnArray>& all_cols,
+                                    int64_t* out_num_bytes_required);
+
   class TransformBoolean {
    public:
     static KeyColumnArray ArrayReplace(const KeyColumnArray& column,
@@ -319,7 +362,7 @@ class KeyEncoder {
     static void Encode(KeyRowArray& rows,
                        const std::vector<KeyColumnArray>& varbinary_cols,
                        KeyEncoderContext* ctx);
-    static void Decode(uint32_t start_row, uint32_t num_rows, KeyRowArray& rows,
+    static void Decode(uint32_t start_row, uint32_t num_rows, const KeyRowArray& rows,
                        std::vector<KeyColumnArray>& varbinary_cols,
                        std::vector<uint32_t>& varbinary_cols_base_offset,
                        KeyEncoderContext* ctx);
@@ -376,6 +419,13 @@ class KeyEncoder {
     static void Decode(uint32_t start_row, uint32_t num_rows, const KeyRowArray& rows,
                        std::vector<KeyColumnArray>& cols);
   };
+
+  KeyEncoderContext* ctx_;
+  KeyRowMetadata row_metadata_;
+  std::vector<KeyColumnArray> batch_all_cols_;
+  std::vector<KeyColumnArray> batch_fixedbinary_cols_;
+  std::vector<KeyColumnArray> batch_varbinary_cols_;
+  std::vector<uint32_t> batch_varbinary_cols_base_offsets_;
 };
 
 template <bool is_row_fixed_length, bool is_encoding, class COPY_FN>
