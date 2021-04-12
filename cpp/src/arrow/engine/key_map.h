@@ -19,16 +19,13 @@
 
 #include <functional>
 
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
+#include "arrow/engine/util.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 
-class SwissTableSimple;
-
 namespace arrow {
-namespace exec {
+namespace compute {
 
 //
 // 0 byte - 7 bucket | 1. byte - 6 bucket | ...
@@ -42,20 +39,19 @@ namespace exec {
 // No other part of data structure uses this reversed order.
 //
 class SwissTable {
-  friend class ::SwissTableSimple;
-
  public:
   SwissTable() = default;
   ~SwissTable() { cleanup(); }
 
   using EqualImpl =
       std::function<void(int num_keys, const uint16_t* selection /* may be null */,
-                         const uint32_t* group_ids, uint8_t* match_bitvector)>;
+                         const uint32_t* group_ids, uint32_t* out_num_keys_mismatch,
+                         uint16_t* out_selection_mismatch)>;
   using AppendImpl = std::function<Status(int num_keys, const uint16_t* selection)>;
 
   Status init(util::CPUInstructionSet cpu_instruction_set, MemoryPool* pool,
-              util::TempBufferAlloc* temp_buffers, int log_minibatch,
-              EqualImpl equal_impl, AppendImpl append_impl);
+              util::TempVectorStack* temp_stack, int log_minibatch, EqualImpl equal_impl,
+              AppendImpl append_impl);
   void cleanup();
 
   Status map(const int ckeys, const uint32_t* hashes, uint32_t* outgroupids);
@@ -122,7 +118,7 @@ class SwissTable {
 #endif
 
   // Completing hash table lookup post first access
-  Status lookup_2(const uint32_t* hashes, int& inout_num_selected,
+  Status lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected,
                   uint16_t* inout_selection, bool& out_need_resize,
                   uint32_t* out_group_ids, uint32_t* out_next_slot_ids);
 
@@ -159,7 +155,7 @@ class SwissTable {
   uint32_t* hashes_;
 
   MemoryPool* pool_;
-  util::TempBufferAlloc* temp_buffers_;
+  util::TempVectorStack* temp_stack_;
 
   EqualImpl equal_impl_;
   AppendImpl append_impl_;
@@ -167,5 +163,5 @@ class SwissTable {
   util::CPUInstructionSet cpu_instruction_set_;
 };
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

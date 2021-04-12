@@ -17,11 +17,10 @@
 
 #include <immintrin.h>
 
-#include "arrow/exec/common.h"
-#include "arrow/exec/groupby_hash.h"
+#include "arrow/engine/key_hash.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 #if defined(ARROW_HAVE_AVX2)
 
@@ -243,5 +242,5 @@ void Hashing::hash_varlen_avx2(uint32_t num_rows, const uint32_t* offsets,
 
 #endif
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

@@ -21,14 +21,13 @@
 #include <memory>
 #include <vector>
 
+#include "arrow/engine/util.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 /// Converts between key representation as a collection of arrays for
 /// individual columns and another representation as a single array of rows
@@ -76,10 +75,9 @@ class KeyEncoder {
     KeyRowArray();
     Status Init(MemoryPool* pool, const KeyRowMetadata& metadata);
     void Clean();
-    Status ResizeFixedLengthBuffers(int64_t num_extra_rows);
-    Status ResizeOptionalVaryingLengthBuffer(int64_t num_extra_bytes);
+    Status AppendEmpty(uint32_t num_rows_to_append, uint32_t num_extra_bytes_to_append);
     Status AppendSelectionFrom(const KeyRowArray& from, uint32_t num_rows_to_append,
-                               uint16_t* source_row_ids);
+                               const uint16_t* source_row_ids);
     const KeyRowMetadata& get_metadata() const { return metadata_; }
     int64_t get_length() const { return num_rows_; }
     const uint8_t* data(int i) const {
@@ -90,21 +88,27 @@ class KeyEncoder {
       ARROW_DCHECK(i >= 0 && i <= max_buffers_);
       return mutable_buffers_[i];
     }
-    uint32_t* get_mutable_offsets() {
-      return reinterpret_cast<uint32_t*>(mutable_data(1));
-    }
     const uint32_t* get_offsets() const {
       return reinterpret_cast<const uint32_t*>(data(1));
+    }
+    uint32_t* get_mutable_offsets() {
+      return reinterpret_cast<uint32_t*>(mutable_data(1));
     }
     const uint8_t* get_null_masks() const { return null_masks_->data(); }
     uint8_t* get_null_masks() { return null_masks_->mutable_data(); }
 
+    bool has_any_nulls(const KeyEncoderContext* ctx) const;
+
    private:
+    Status ResizeFixedLengthBuffers(int64_t num_extra_rows);
+    Status ResizeOptionalVaryingLengthBuffer(int64_t num_extra_bytes);
+
     int64_t size_null_masks(int64_t num_rows);
     int64_t size_offsets(int64_t num_rows);
     int64_t size_rows_fixed_length(int64_t num_rows);
     int64_t size_rows_varying_length(int64_t num_bytes);
     void update_buffer_pointers();
+
     static constexpr int64_t padding_for_vectors = 64;
     MemoryPool* pool_;
     KeyRowMetadata metadata_;
@@ -118,6 +122,10 @@ class KeyEncoder {
     int64_t num_rows_;
     int64_t rows_capacity_;
     int64_t bytes_capacity_;
+
+    // Mutable to allow lazy evaluation
+    mutable int64_t num_rows_for_has_any_nulls_;
+    mutable bool has_any_nulls_;
   };
 
   /// Description of a storage format of a single key column as needed
@@ -319,7 +327,9 @@ class KeyEncoder {
    public:
     static bool CanProcessPair(const KeyColumnMetadata& col1,
                                const KeyColumnMetadata& col2) {
-      return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2);
+      return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2) /*&&
+             col1.fixed_length == col2.fixed_length*/
+          ;
     }
     static void Encode(uint32_t* offset_within_row, KeyRowArray& rows,
                        const KeyColumnArray& col1, const KeyColumnArray& col2,
@@ -331,11 +341,11 @@ class KeyEncoder {
                        KeyColumnArray& temp1, KeyColumnArray& temp2);
 
    private:
-    template <bool is_row_fixed_length, int col_width_1, int col_width_2>
+    template <bool is_row_fixed_length, typename col1_type, typename col2_type>
     static void EncodeImp(uint32_t num_rows_to_skip, uint32_t offset_within_row,
                           KeyRowArray& rows, const KeyColumnArray& col1,
                           const KeyColumnArray& col2);
-    template <bool is_row_fixed_length, int col_width_1, int col_width_2>
+    template <bool is_row_fixed_length, typename col1_type, typename col2_type>
     static void DecodeImp(uint32_t num_rows_to_skip, uint32_t start_row,
                           uint32_t num_rows, uint32_t offset_within_row,
                           const KeyRowArray& rows, KeyColumnArray& col1,
@@ -368,7 +378,7 @@ class KeyEncoder {
                        KeyEncoderContext* ctx);
 
    private:
-    static void EncodeImp(uint32_t num_rows_to_skip, KeyRowArray& rows,
+    static void EncodeImp(uint32_t num_rows_already_processed, KeyRowArray& rows,
                           const std::vector<KeyColumnArray>& varbinary_cols);
 #if defined(ARROW_HAVE_AVX2)
     static uint32_t EncodeImp_avx2(KeyRowArray& rows,
@@ -499,17 +509,25 @@ inline void KeyEncoder::EncoderVarBinary::EncodeDecodeHelper(
   for (uint32_t i = 0; i < num_rows; ++i) {
     uint32_t col_offset = col_offset_next;
     col_offset_next = col_offsets[i + 1];
-    uint32_t length = col_offset_next - col_offset;
 
     // Find offset to the beginning of varbinary data of this column in encoded row.
     // The offset is the cumulative length of varbinary values for the previous varbinary
     // column or zero for the first varbinary column.
     uint32_t row_offset = row_offsets_for_batch[i];
-    if (!first_varbinary_col) {
-      row_offset += reinterpret_cast<const uint32_t*>(rows_const->data(2) + row_offset +
-                                                      cumulative_length_offset)[-1];
+    const uint32_t* cumulative_lengths = reinterpret_cast<const uint32_t*>(
+        rows_const->data(2) + row_offset + cumulative_length_offset);
+    uint32_t offset_within_varbinaries;
+    uint32_t length;
+    if (first_varbinary_col) {
+      offset_within_varbinaries = 0;
+      length = *cumulative_lengths;
+    } else {
+      uint64_t offsets_pair = *reinterpret_cast<const uint64_t*>(cumulative_lengths - 1);
+      offset_within_varbinaries = (offsets_pair & 0xffffffff);
+      length = (offsets_pair >> 32) - offset_within_varbinaries;
     }
     row_offset += first_varbinary_offset;
+    row_offset += offset_within_varbinaries;
 
     const uint8_t* src;
     uint8_t* dst;
@@ -524,5 +542,5 @@ inline void KeyEncoder::EncoderVarBinary::EncodeDecodeHelper(
   }
 }
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

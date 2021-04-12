@@ -17,12 +17,10 @@
 
 #include <immintrin.h>
 
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
+#include "arrow/engine/util.h"
 #include "arrow/util/bit_util.h"
 
 namespace arrow {
-namespace exec {
 namespace util {
 
 #if defined(ARROW_HAVE_AVX2)
@@ -164,27 +162,22 @@ void BitUtil::bytes_to_bits_avx2(const int num_bits, const uint8_t* bytes,
   }
 }
 
-void BitUtil::bit_vector_lookup_avx2(const int num_lookups, const uint32_t* bit_ids,
-                                     const uint8_t* bits, uint8_t* result) {
-  constexpr int unroll = 8;
-  for (int i = 0; i < num_lookups / unroll; ++i) {
-    __m256i id = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bit_ids) + i);
-    __m256i bit = _mm256_i32gather_epi32(reinterpret_cast<const int*>(bits),
-                                         _mm256_srli_epi32(id, 5), 4);
-    bit = _mm256_srlv_epi32(bit, _mm256_and_si256(id, _mm256_set1_epi32(31)));
-    bit = _mm256_shuffle_epi8(
-        bit,
-        _mm256_setr_epi32(0x0c080400UL, static_cast<int>(~0UL), static_cast<int>(~0UL),
-                          static_cast<int>(~0UL), 0x0c080400UL, static_cast<int>(~0UL),
-                          static_cast<int>(~0UL), static_cast<int>(~0UL)));
-    bit = _mm256_permutevar8x32_epi32(bit, _mm256_setr_epi32(0, 4, 1, 1, 1, 1, 1, 1));
-    bit = _mm256_slli_epi32(bit, 7);
-    result[i] = _mm256_movemask_epi8(bit);
+bool BitUtil::are_all_bytes_zero_avx2(const uint8_t* bytes, uint32_t num_bytes) {
+  __m256i result_or = _mm256_setzero_si256();
+  uint32_t i;
+  for (i = 0; i < num_bytes / 32; ++i) {
+    __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bytes) + i);
+    result_or = _mm256_or_si256(result_or, x);
   }
+  uint32_t result_or32 = _mm256_movemask_epi8(result_or);
+  if (num_bytes % 32 > 0) {
+    uint64_t tail[4] = {0, 0, 0, 0};
+    result_or32 |= memcmp(bytes + i * 32, tail, num_bytes % 32);
+  }
+  return result_or32 == 0;
 }
 
 #endif  // ARROW_HAVE_AVX2
 
 }  // namespace util
-}  // namespace exec
 }  // namespace arrow

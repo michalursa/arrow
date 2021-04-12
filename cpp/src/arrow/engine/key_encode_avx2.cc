@@ -15,14 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "key_encode.h"
+#include "arrow/engine/key_encode.h"
 
 #include <immintrin.h>
 
-#include "common.h"
-
 namespace arrow {
-namespace exec {
+namespace compute {
 
 #if defined(ARROW_HAVE_AVX2)
 
@@ -89,7 +87,7 @@ void KeyEncoder::EncoderBinary::DecodeImp_avx2(uint32_t start_row, uint32_t num_
         for (uint32_t istripe = 0; istripe < (length + 31) / 32; ++istripe) {
           __m256i* dst256 = reinterpret_cast<__m256i*>(dst);
           const __m256i* src256 = reinterpret_cast<const __m256i*>(src);
-          dst256[istripe] = src256[istripe];
+          _mm256_storeu_si256(dst256 + istripe, _mm256_loadu_si256(src256 + istripe));
         }
       });
 }
@@ -178,13 +176,13 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
             *reinterpret_cast<uint16_t*>(dst + fixed_length * j) =
-                *reinterpret_cast<const uint16_t*>(buffer[j]);
+                reinterpret_cast<const uint16_t*>(buffer)[j];
           } else if (col_width == 2) {
             *reinterpret_cast<uint32_t*>(dst + fixed_length * j) =
-                *reinterpret_cast<const uint32_t*>(buffer[j]);
+                reinterpret_cast<const uint32_t*>(buffer)[j];
           } else if (col_width == 4) {
             *reinterpret_cast<uint64_t*>(dst + fixed_length * j) =
-                *reinterpret_cast<const uint64_t*>(buffer[j]);
+                reinterpret_cast<const uint64_t*>(buffer)[j];
           }
         }
       } else {
@@ -193,13 +191,13 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
             *reinterpret_cast<uint16_t*>(dst + row_offsets[j]) =
-                *reinterpret_cast<const uint16_t*>(buffer[j]);
+                reinterpret_cast<const uint16_t*>(buffer)[j];
           } else if (col_width == 2) {
             *reinterpret_cast<uint32_t*>(dst + row_offsets[j]) =
-                *reinterpret_cast<const uint32_t*>(buffer[j]);
+                reinterpret_cast<const uint32_t*>(buffer)[j];
           } else if (col_width == 4) {
             *reinterpret_cast<uint64_t*>(dst + row_offsets[j]) =
-                *reinterpret_cast<const uint64_t*>(buffer[j]);
+                reinterpret_cast<const uint64_t*>(buffer)[j];
           }
         }
       }
@@ -444,7 +442,7 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
         col_length = _mm256_sub_epi32(col_length, null_length);
       }
 
-      _mm256_add_epi32(col_length_sum, col_length);
+      col_length_sum = _mm256_add_epi32(col_length_sum, col_length);
       _mm256_storeu_si256(reinterpret_cast<__m256i*>(temp_cumulative_lengths) + col,
                           col_length_sum);
     }
@@ -519,7 +517,7 @@ void KeyEncoder::EncoderVarBinary::DecodeImp_avx2(uint32_t start_row, uint32_t n
         for (uint32_t istripe = 0; istripe < (length + 31) / 32; ++istripe) {
           __m256i* dst256 = reinterpret_cast<__m256i*>(dst);
           const __m256i* src256 = reinterpret_cast<const __m256i*>(src);
-          dst256[istripe] = src256[istripe];
+          _mm256_storeu_si256(dst256 + istripe, _mm256_loadu_si256(src256 + istripe));
         }
       });
 }
@@ -534,5 +532,5 @@ template void KeyEncoder::EncoderVarBinary::DecodeImp_avx2<true>(uint32_t, uint3
 
 #endif
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

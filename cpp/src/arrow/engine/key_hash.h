@@ -21,11 +21,10 @@
 
 #include <cstdint>
 
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
+#include "arrow/engine/util.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 // Implementations are based on xxh3 32-bit algorithm description from:
 // https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
@@ -90,5 +89,5 @@ class Hashing {
 #endif
 };
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

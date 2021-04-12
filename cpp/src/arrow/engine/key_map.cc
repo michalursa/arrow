@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/exec/groupby_map.h"
+#include "arrow/engine/key_map.h"
 
 #include <immintrin.h>
 #include <memory.h>
@@ -23,7 +23,6 @@
 #include <algorithm>
 #include <cstdint>
 
-#include "arrow/exec/common.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
 
@@ -31,7 +30,7 @@ namespace arrow {
 
 using BitUtil::CountLeadingZeros;
 
-namespace exec {
+namespace compute {
 
 constexpr uint64_t kHighBitOfEachByte = 0x8080808080808080ULL;
 
@@ -131,7 +130,7 @@ template void SwissTable::lookup_1<false>(const uint16_t*, const int, const uint
 // Update selection vector to reflect which items have been processed.
 // Ids in selection vector do not have to be sorted.
 //
-Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
+Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected,
                             uint16_t* inout_selection, bool& out_need_resize,
                             uint32_t* out_group_ids, uint32_t* inout_next_slot_ids) {
   // How many groups we can keep in hash table without resizing.
@@ -146,18 +145,17 @@ Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
   // Temporary arrays are of limited size.
   // The input needs to be split into smaller portions if it exceeds that limit.
   //
-  ARROW_DCHECK(inout_num_selected <= (1 << log_minibatch_));
+  ARROW_DCHECK(inout_num_selected <= static_cast<uint32_t>(1 << log_minibatch_));
 
   // We will split input row ids into three categories:
   // - needing to visit next block [0]
   // - needing comparison [1]
   // - inserted [2]
   //
-  // TODO: Move away from temp buffers to pre-allocated buffers
-  util::TempBuffer<uint16_t> ids_inserted_buf(temp_buffers_);
-  RETURN_NOT_OK(ids_inserted_buf.alloc());
-  util::TempBuffer<uint16_t> ids_for_comparison_buf(temp_buffers_);
-  RETURN_NOT_OK(ids_for_comparison_buf.alloc());
+  auto ids_inserted_buf =
+      util::TempVectorHolder<uint16_t>(temp_stack_, inout_num_selected);
+  auto ids_for_comparison_buf =
+      util::TempVectorHolder<uint16_t>(temp_stack_, inout_num_selected);
   constexpr int category_nomatch = 0;
   constexpr int category_cmp = 1;
   constexpr int category_inserted = 2;
@@ -175,7 +173,7 @@ Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
   constexpr uint64_t stamp_mask = 0x7f;
   uint64_t num_block_bytes = (8 + num_groupid_bits);
 
-  int num_processed;
+  uint32_t num_processed;
   for (num_processed = 0;
        // Second condition in for loop:
        // We need to break processing and have the caller of this function
@@ -228,14 +226,9 @@ Status SwissTable::lookup_2(const uint32_t* hashes, int& inout_num_selected,
   // Add 3 copies of the first id, so that SIMD processing 4 elements at a time can work.
   //
   {
-    util::TempBuffer<uint8_t> cmp_result_buf(temp_buffers_);
-    RETURN_NOT_OK(cmp_result_buf.alloc());
-    uint8_t* cmp_result = cmp_result_buf.mutable_data();
-    equal_impl_(num_ids[category_cmp], ids[category_cmp], out_group_ids, cmp_result);
-    int num_not_equal;
-    util::BitUtil::bits_filter_indexes<0>(
-        cpu_instruction_set_, num_ids[category_cmp], cmp_result, ids[category_cmp],
-        num_not_equal, ids[category_nomatch] + num_ids[category_nomatch]);
+    uint32_t num_not_equal;
+    equal_impl_(num_ids[category_cmp], ids[category_cmp], out_group_ids, &num_not_equal,
+                ids[category_nomatch] + num_ids[category_nomatch]);
     num_ids[category_nomatch] += num_not_equal;
   }
 
@@ -259,23 +252,17 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
   ARROW_DCHECK(num_keys <= (1 << log_minibatch_));
 
   // Allocate temporary buffers
-  util::TempBuffer<uint8_t> match_bitvector_buf(temp_buffers_);
-  RETURN_NOT_OK(match_bitvector_buf.alloc());
+  auto match_bitvector_buf = util::TempVectorHolder<uint8_t>(temp_stack_, num_keys);
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
-
-  util::TempBuffer<uint32_t> slot_ids_buf(temp_buffers_);
-  RETURN_NOT_OK(slot_ids_buf.alloc());
+  auto slot_ids_buf = util::TempVectorHolder<uint32_t>(temp_stack_, num_keys);
   uint32_t* slot_ids = slot_ids_buf.mutable_data();
-
-  util::TempBuffer<uint16_t> ids_buf(temp_buffers_);
-  RETURN_NOT_OK(ids_buf.alloc());
+  auto ids_buf = util::TempVectorHolder<uint16_t>(temp_stack_, num_keys);
   uint16_t* ids = ids_buf.mutable_data();
-  int num_ids;
+  uint32_t num_ids;
 
   switch (cpu_instruction_set_) {
     case util::CPUInstructionSet::scalar:
-      lookup_1<false>(nullptr, num_keys, hashes, match_bitvector, out_groupids,
-                      slot_ids);
+      lookup_1<false>(nullptr, num_keys, hashes, match_bitvector, out_groupids, slot_ids);
       break;
 #if defined(ARROW_HAVE_AVX2)
     case util::CPUInstructionSet::avx2:
@@ -285,7 +272,7 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
         lookup_1_avx2_x32(num_keys - tail, hashes, match_bitvector, out_groupids,
                           slot_ids);
         lookup_1_avx2_x8(tail, hashes + delta, match_bitvector + delta / 8,
-                          out_groupids + delta, slot_ids + delta);
+                         out_groupids + delta, slot_ids + delta);
       } else {
         lookup_1_avx2_x8(num_keys, hashes, match_bitvector, out_groupids, slot_ids);
       }
@@ -304,20 +291,16 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
 
   // TODO: explain num_inserted_ > 0 condition below
   if (num_inserted_ > 0 && num_matches > 0 && num_matches > 3 * num_keys / 4) {
-    equal_impl_(num_keys, nullptr, out_groupids, match_bitvector);
-    util::BitUtil::bits_to_indexes<0>(cpu_instruction_set_, num_keys, match_bitvector,
-                                      num_ids, ids);
+    equal_impl_(num_keys, nullptr, out_groupids, &num_ids, ids);
   } else {
-    util::TempBuffer<uint16_t> ids_cmp_buf(temp_buffers_);
-    RETURN_NOT_OK(ids_cmp_buf.alloc());
+    auto ids_cmp_buf = util::TempVectorHolder<uint16_t>(temp_stack_, num_keys);
     uint16_t* ids_cmp = ids_cmp_buf.mutable_data();
+    int num_ids_result;
     util::BitUtil::bits_split_indexes(cpu_instruction_set_, num_keys, match_bitvector,
-                                      num_ids, ids, ids_cmp);
-    equal_impl_(num_keys - num_ids, ids_cmp, out_groupids, match_bitvector);
-    int num_not_equal;
-    util::BitUtil::bits_filter_indexes<0>(cpu_instruction_set_, num_keys - num_ids,
-                                          match_bitvector, ids_cmp, num_not_equal,
-                                          ids + num_ids);
+                                      num_ids_result, ids, ids_cmp);
+    num_ids = num_ids_result;
+    uint32_t num_not_equal;
+    equal_impl_(num_keys - num_ids, ids_cmp, out_groupids, &num_not_equal, ids + num_ids);
     num_ids += num_not_equal;
   }
 
@@ -328,7 +311,7 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
     if (out_of_capacity) {
       RETURN_NOT_OK(grow_double());
       // Set slot_ids for selected vectors to first slot in new initial block.
-      for (int i = 0; i < num_ids; ++i) {
+      for (uint32_t i = 0; i < num_ids; ++i) {
         slot_ids[ids[i]] = (hashes[ids[i]] >> (bits_hash_ - log_blocks_)) * 8;
       }
     }
@@ -464,11 +447,11 @@ Status SwissTable::grow_double() {
 }
 
 Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool* pool,
-                        util::TempBufferAlloc* temp_buffers, int log_minibatch,
+                        util::TempVectorStack* temp_stack, int log_minibatch,
                         EqualImpl equal_impl, AppendImpl append_impl) {
   cpu_instruction_set_ = cpu_instruction_set;
   pool_ = pool;
-  temp_buffers_ = temp_buffers;
+  temp_stack_ = temp_stack;
   log_minibatch_ = log_minibatch;
   equal_impl_ = equal_impl;
   append_impl_ = append_impl;
@@ -510,5 +493,5 @@ void SwissTable::cleanup() {
   num_inserted_ = 0;
 }
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

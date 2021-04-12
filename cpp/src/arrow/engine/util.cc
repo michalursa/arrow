@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/exec/util.h"
+#include "arrow/engine/util.h"
 
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
@@ -24,7 +24,6 @@ namespace arrow {
 
 using BitUtil::CountTrailingZeros;
 
-namespace exec {
 namespace util {
 
 inline void BitUtil::bits_to_indexes_helper(uint64_t word, uint16_t base_index,
@@ -220,32 +219,25 @@ void BitUtil::bytes_to_bits(CPUInstructionSet instruction_set, const int num_bit
   }
 }
 
-void BitUtil::bit_vector_lookup(CPUInstructionSet instruction_set, const int num_lookups,
-                                const uint32_t* bit_ids, const uint8_t* bits,
-                                uint8_t* result) {
-  int num_processed = 0;
+bool BitUtil::are_all_bytes_zero(CPUInstructionSet instr, const uint8_t* bytes,
+                                 uint32_t num_bytes) {
 #if defined(ARROW_HAVE_AVX2)
-  if (instruction_set == util::CPUInstructionSet::avx2) {
-    // The function call below processes whole 8 lookups together.
-    num_processed = num_lookups - (num_lookups % 8);
-    bit_vector_lookup_avx2(num_processed, bit_ids, bits, result);
+  if (instr == CPUInstructionSet::avx2) {
+    return are_all_bytes_zero_avx2(bytes, num_bytes);
   }
 #endif
-  uint8_t next_result = 0;
-  for (int i = num_processed; i < num_lookups; ++i) {
-    uint32_t id = bit_ids[i];
-    int bit = ((bits[id / 8] >> (id & 7)) & 1);
-    next_result |= bit << (i & 7);
-    if ((i & 7) == 7) {
-      result[i / 8] = next_result;
-      next_result = 0;
-    }
+  uint64_t result_or = 0;
+  uint32_t i;
+  for (i = 0; i < num_bytes / 8; ++i) {
+    uint64_t x = reinterpret_cast<const uint64_t*>(bytes)[i];
+    result_or |= x;
   }
-  if ((num_lookups % 8) > 0) {
-    result[num_lookups / 8] = next_result;
+  if (num_bytes % 8 > 0) {
+    uint64_t tail = 0;
+    result_or |= memcmp(bytes + i * 8, &tail, num_bytes % 8);
   }
+  return result_or == 0;
 }
 
 }  // namespace util
-}  // namespace exec
 }  // namespace arrow

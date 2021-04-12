@@ -15,17 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/exec/key_encode.h"
+#include "arrow/engine/key_encode.h"
 
 #include <memory.h>
 #include <algorithm>
 
+#include "arrow/engine/util.h"
 #include "arrow/util/bit_util.h"
-#include "arrow/exec/common.h"
-#include "arrow/exec/util.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 KeyEncoder::KeyRowArray::KeyRowArray()
     : pool_(nullptr), rows_capacity_(0), bytes_capacity_(0) {}
@@ -40,24 +39,29 @@ Status KeyEncoder::KeyRowArray::Init(MemoryPool* pool, const KeyRowMetadata& met
   constexpr int64_t bytes_capacity = 1024;
 
   // Null masks
-  ARROW_ASSIGN_OR_RAISE(null_masks_,
+  ARROW_ASSIGN_OR_RAISE(auto null_masks,
                         AllocateResizableBuffer(size_null_masks(rows_capacity), pool_));
+  null_masks_ = std::move(null_masks);
   memset(null_masks_->mutable_data(), 0, size_null_masks(rows_capacity));
 
   // Offsets and rows
   if (!metadata.is_fixed_length) {
-    ARROW_ASSIGN_OR_RAISE(offsets_,
+    ARROW_ASSIGN_OR_RAISE(auto offsets,
                           AllocateResizableBuffer(size_offsets(rows_capacity), pool_));
+    offsets_ = std::move(offsets);
     memset(offsets_->mutable_data(), 0, size_offsets(rows_capacity));
     reinterpret_cast<uint32_t*>(offsets_->mutable_data())[0] = 0;
 
     ARROW_ASSIGN_OR_RAISE(
-        rows_, AllocateResizableBuffer(size_rows_varying_length(bytes_capacity), pool_));
+        auto rows,
+        AllocateResizableBuffer(size_rows_varying_length(bytes_capacity), pool_));
+    rows_ = std::move(rows);
     memset(rows_->mutable_data(), 0, size_rows_varying_length(bytes_capacity));
     bytes_capacity_ = size_rows_varying_length(bytes_capacity) - padding_for_vectors;
   } else {
     ARROW_ASSIGN_OR_RAISE(
-        rows_, AllocateResizableBuffer(size_rows_fixed_length(rows_capacity), pool_));
+        auto rows, AllocateResizableBuffer(size_rows_fixed_length(rows_capacity), pool_));
+    rows_ = std::move(rows);
     memset(rows_->mutable_data(), 0, size_rows_fixed_length(rows_capacity));
     bytes_capacity_ = size_rows_fixed_length(rows_capacity) - padding_for_vectors;
   }
@@ -67,12 +71,17 @@ Status KeyEncoder::KeyRowArray::Init(MemoryPool* pool, const KeyRowMetadata& met
   rows_capacity_ = rows_capacity;
 
   num_rows_ = 0;
+  num_rows_for_has_any_nulls_ = 0;
+  has_any_nulls_ = false;
 
   return Status::OK();
 }
 
 void KeyEncoder::KeyRowArray::Clean() {
   num_rows_ = 0;
+  num_rows_for_has_any_nulls_ = 0;
+  has_any_nulls_ = false;
+
   if (!metadata_.is_fixed_length) {
     reinterpret_cast<uint32_t*>(offsets_->mutable_data())[0] = 0;
   }
@@ -166,7 +175,7 @@ Status KeyEncoder::KeyRowArray::ResizeOptionalVaryingLengthBuffer(
 
 Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
                                                     uint32_t num_rows_to_append,
-                                                    uint16_t* source_row_ids) {
+                                                    const uint16_t* source_row_ids) {
   ARROW_DCHECK(metadata_.is_fixed_length == from.get_metadata().is_fixed_length &&
                metadata_.fixed_length == from.get_metadata().fixed_length &&
                metadata_.cumulative_lengths_length ==
@@ -242,6 +251,28 @@ Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
   return Status::OK();
 }
 
+Status KeyEncoder::KeyRowArray::AppendEmpty(uint32_t num_rows_to_append,
+                                            uint32_t num_extra_bytes_to_append) {
+  RETURN_NOT_OK(ResizeFixedLengthBuffers(num_rows_to_append));
+  RETURN_NOT_OK(ResizeOptionalVaryingLengthBuffer(num_extra_bytes_to_append));
+  num_rows_ += num_rows_to_append;
+  return Status::OK();
+}
+
+bool KeyEncoder::KeyRowArray::has_any_nulls(const KeyEncoderContext* ctx) const {
+  if (has_any_nulls_) {
+    return true;
+  }
+  if (num_rows_for_has_any_nulls_ < num_rows_) {
+    auto size_per_row = get_metadata().null_masks_bytes_per_row;
+    has_any_nulls_ = !util::BitUtil::are_all_bytes_zero(
+        ctx->instr, get_null_masks() + size_per_row * num_rows_for_has_any_nulls_,
+        static_cast<uint32_t>(size_per_row * (num_rows_ - num_rows_for_has_any_nulls_)));
+    num_rows_for_has_any_nulls_ = num_rows_;
+  }
+  return has_any_nulls_;
+}
+
 KeyEncoder::KeyColumnArray::KeyColumnArray(const KeyColumnMetadata& metadata,
                                            const KeyColumnArray& left,
                                            const KeyColumnArray& right,
@@ -285,12 +316,22 @@ KeyEncoder::KeyColumnArray::KeyColumnArray(const KeyColumnArray& from, int64_t s
   length_ = length;
   uint32_t fixed_size =
       !metadata_.is_fixed_length ? sizeof(uint32_t) : metadata_.fixed_length;
+
   buffers_[0] = from.buffers_[0] ? from.buffers_[0] + start / 8 : nullptr;
   mutable_buffers_[0] =
       from.mutable_buffers_[0] ? from.mutable_buffers_[0] + start / 8 : nullptr;
-  buffers_[1] = from.buffers_[1] ? from.buffers_[1] + start * fixed_size : nullptr;
-  mutable_buffers_[1] =
-      from.mutable_buffers_[1] ? from.mutable_buffers_[1] + start * fixed_size : nullptr;
+
+  if (fixed_size == 0) {
+    buffers_[1] = from.buffers_[1] ? from.buffers_[1] + start / 8 : nullptr;
+    mutable_buffers_[1] =
+        from.mutable_buffers_[1] ? from.mutable_buffers_[1] + start / 8 : nullptr;
+  } else {
+    buffers_[1] = from.buffers_[1] ? from.buffers_[1] + start * fixed_size : nullptr;
+    mutable_buffers_[1] = from.mutable_buffers_[1]
+                              ? from.mutable_buffers_[1] + start * fixed_size
+                              : nullptr;
+  }
+
   buffers_[2] = from.buffers_[2];
   mutable_buffers_[2] = from.mutable_buffers_[2];
 }
@@ -371,7 +412,7 @@ void KeyEncoder::EncoderInteger::PreEncode(const KeyColumnArray& input,
 void KeyEncoder::EncoderInteger::PostDecode(const KeyColumnArray& input,
                                             KeyColumnArray& output,
                                             KeyEncoderContext* ctx) {
-  if (IsBoolean(input.get_metadata())) {
+  if (IsBoolean(output.get_metadata())) {
     TransformBoolean::PostDecode(input, output, ctx);
   }
 }
@@ -514,7 +555,7 @@ void KeyEncoder::EncoderInteger::Decode(uint32_t start_row, uint32_t num_rows,
     }
   } else {
     const uint32_t* row_offsets = rows.get_offsets() + start_row;
-    const uint8_t* row_base = rows.data(2) + row_offsets[0];
+    const uint8_t* row_base = rows.data(2);
     row_base += *offset_within_row;
     uint8_t* col_base = col_prep.mutable_data(1);
     switch (col_prep.get_metadata().fixed_length) {
@@ -656,10 +697,15 @@ void KeyEncoder::EncoderBinary::EncodeImp(uint32_t offset_within_row, KeyRowArra
   EncodeDecodeHelper<is_row_fixed_length, true>(
       0, static_cast<uint32_t>(col.get_length()), offset_within_row, &rows, &rows, &col,
       nullptr, [](uint8_t* dst, const uint8_t* src, int64_t length) {
-        for (uint32_t istripe = 0; istripe < (length + 7) / 8; ++istripe) {
-          uint64_t* dst64 = reinterpret_cast<uint64_t*>(dst);
-          const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
+        uint64_t* dst64 = reinterpret_cast<uint64_t*>(dst);
+        const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
+        uint32_t istripe;
+        for (istripe = 0; istripe < length / 8; ++istripe) {
           dst64[istripe] = src64[istripe];
+        }
+        if ((length % 8) > 0) {
+          uint64_t mask_last = ~0ULL >> (8 * (8 * (istripe + 1) - length));
+          dst64[istripe] = (dst64[istripe] & ~mask_last) | (src64[istripe] & mask_last);
         }
       });
 }
@@ -682,8 +728,9 @@ void KeyEncoder::EncoderBinary::DecodeImp(uint32_t start_row, uint32_t num_rows,
 void KeyEncoder::EncoderBinary::ColumnMemsetNulls(
     uint32_t offset_within_row, KeyRowArray& rows, const KeyColumnArray& col,
     KeyEncoderContext* ctx, KeyColumnArray& temp_vector_16bit, uint8_t byte_value) {
-  void (*ColumnMemsetNullsImp_fn[])(uint32_t, KeyRowArray&, const KeyColumnArray&,
-                                    KeyEncoderContext*, KeyColumnArray&, uint8_t) = {
+  typedef void (*ColumnMemsetNullsImp_t)(uint32_t, KeyRowArray&, const KeyColumnArray&,
+                                         KeyEncoderContext*, KeyColumnArray&, uint8_t);
+  static const ColumnMemsetNullsImp_t ColumnMemsetNullsImp_fn[] = {
       ColumnMemsetNullsImp<false, 1>,  ColumnMemsetNullsImp<false, 2>,
       ColumnMemsetNullsImp<false, 4>,  ColumnMemsetNullsImp<false, 8>,
       ColumnMemsetNullsImp<false, 16>, ColumnMemsetNullsImp<true, 1>,
@@ -794,8 +841,9 @@ void KeyEncoder::EncoderBinaryPair::Encode(uint32_t* offset_within_row, KeyRowAr
   uint32_t num_processed = 0;
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2() && col_width1 == col_width2) {
-    uint32_t (*EncodeImp_avx2_fn[])(uint32_t, KeyRowArray&, const KeyColumnArray&,
-                                    const KeyColumnArray&) = {
+    typedef uint32_t (*EncodeImp_avx2_t)(uint32_t, KeyRowArray&, const KeyColumnArray&,
+                                         const KeyColumnArray&);
+    static const EncodeImp_avx2_t EncodeImp_avx2_fn[] = {
         EncodeImp_avx2<false, 1>, EncodeImp_avx2<false, 2>, EncodeImp_avx2<false, 4>,
         EncodeImp_avx2<false, 8>, EncodeImp_avx2<true, 1>,  EncodeImp_avx2<true, 2>,
         EncodeImp_avx2<true, 4>,  EncodeImp_avx2<true, 8>};
@@ -805,19 +853,25 @@ void KeyEncoder::EncoderBinaryPair::Encode(uint32_t* offset_within_row, KeyRowAr
   }
 #endif
   if (num_processed < num_rows) {
-    void (*EncodeImp_fn[])(uint32_t, uint32_t, KeyRowArray&, const KeyColumnArray&,
-                           const KeyColumnArray&) = {
-        EncodeImp<false, 1, 1>, EncodeImp<false, 2, 1>, EncodeImp<false, 4, 1>,
-        EncodeImp<false, 8, 1>, EncodeImp<false, 1, 2>, EncodeImp<false, 2, 2>,
-        EncodeImp<false, 4, 2>, EncodeImp<false, 8, 2>, EncodeImp<false, 1, 4>,
-        EncodeImp<false, 2, 4>, EncodeImp<false, 4, 4>, EncodeImp<false, 8, 4>,
-        EncodeImp<false, 1, 8>, EncodeImp<false, 2, 8>, EncodeImp<false, 4, 8>,
-        EncodeImp<false, 8, 8>, EncodeImp<true, 1, 1>,  EncodeImp<true, 2, 1>,
-        EncodeImp<true, 4, 1>,  EncodeImp<true, 8, 1>,  EncodeImp<true, 1, 2>,
-        EncodeImp<true, 2, 2>,  EncodeImp<true, 4, 2>,  EncodeImp<true, 8, 2>,
-        EncodeImp<true, 1, 4>,  EncodeImp<true, 2, 4>,  EncodeImp<true, 4, 4>,
-        EncodeImp<true, 8, 4>,  EncodeImp<true, 1, 8>,  EncodeImp<true, 2, 8>,
-        EncodeImp<true, 4, 8>,  EncodeImp<true, 8, 8>};
+    typedef void (*EncodeImp_t)(uint32_t, uint32_t, KeyRowArray&, const KeyColumnArray&,
+                                const KeyColumnArray&);
+    static const EncodeImp_t EncodeImp_fn[] = {
+        EncodeImp<false, uint8_t, uint8_t>,   EncodeImp<false, uint16_t, uint8_t>,
+        EncodeImp<false, uint32_t, uint8_t>,  EncodeImp<false, uint64_t, uint8_t>,
+        EncodeImp<false, uint8_t, uint16_t>,  EncodeImp<false, uint16_t, uint16_t>,
+        EncodeImp<false, uint32_t, uint16_t>, EncodeImp<false, uint64_t, uint16_t>,
+        EncodeImp<false, uint8_t, uint32_t>,  EncodeImp<false, uint16_t, uint32_t>,
+        EncodeImp<false, uint32_t, uint32_t>, EncodeImp<false, uint64_t, uint32_t>,
+        EncodeImp<false, uint8_t, uint64_t>,  EncodeImp<false, uint16_t, uint64_t>,
+        EncodeImp<false, uint32_t, uint64_t>, EncodeImp<false, uint64_t, uint64_t>,
+        EncodeImp<true, uint8_t, uint8_t>,    EncodeImp<true, uint16_t, uint8_t>,
+        EncodeImp<true, uint32_t, uint8_t>,   EncodeImp<true, uint64_t, uint8_t>,
+        EncodeImp<true, uint8_t, uint16_t>,   EncodeImp<true, uint16_t, uint16_t>,
+        EncodeImp<true, uint32_t, uint16_t>,  EncodeImp<true, uint64_t, uint16_t>,
+        EncodeImp<true, uint8_t, uint32_t>,   EncodeImp<true, uint16_t, uint32_t>,
+        EncodeImp<true, uint32_t, uint32_t>,  EncodeImp<true, uint64_t, uint32_t>,
+        EncodeImp<true, uint8_t, uint64_t>,   EncodeImp<true, uint16_t, uint64_t>,
+        EncodeImp<true, uint32_t, uint64_t>,  EncodeImp<true, uint64_t, uint64_t>};
     int dispatch_const = (log_col_width2 << 2) | log_col_width1;
     dispatch_const += (is_row_fixed_length ? 16 : 0);
     EncodeImp_fn[dispatch_const](num_processed, *offset_within_row, rows, col_prep[0],
@@ -826,7 +880,7 @@ void KeyEncoder::EncoderBinaryPair::Encode(uint32_t* offset_within_row, KeyRowAr
   *offset_within_row += col_width1 + col_width2;
 }
 
-template <bool is_row_fixed_length, int col_width_1, int col_width_2>
+template <bool is_row_fixed_length, typename col1_type, typename col2_type>
 void KeyEncoder::EncoderBinaryPair::EncodeImp(uint32_t num_rows_to_skip,
                                               uint32_t offset_within_row,
                                               KeyRowArray& rows,
@@ -834,37 +888,37 @@ void KeyEncoder::EncoderBinaryPair::EncodeImp(uint32_t num_rows_to_skip,
                                               const KeyColumnArray& col2) {
   const uint8_t* src_A = col1.data(1);
   const uint8_t* src_B = col2.data(1);
-  uint32_t col_width_A = col1.get_metadata().fixed_length;
-  uint32_t col_width_B = col2.get_metadata().fixed_length;
 
   uint32_t num_rows = static_cast<uint32_t>(col1.get_length());
 
-  for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
-    uint8_t* dst;
-    if (is_row_fixed_length) {
-      dst =
-          rows.mutable_data(1) + rows.get_metadata().fixed_length * i + offset_within_row;
-    } else {
-      dst = rows.mutable_data(2) + rows.get_offsets()[i] + offset_within_row;
+  uint32_t fixed_length = rows.get_metadata().fixed_length;
+  const uint32_t* offsets;
+  uint8_t* dst_base;
+  if (is_row_fixed_length) {
+    dst_base = rows.mutable_data(1) + offset_within_row;
+    offsets = nullptr;
+  } else {
+    dst_base = rows.mutable_data(2) + offset_within_row;
+    offsets = rows.get_offsets();
+  }
+
+  using col1_type_const = typename std::add_const<col1_type>::type;
+  using col2_type_const = typename std::add_const<col2_type>::type;
+
+  if (is_row_fixed_length) {
+    uint8_t* dst = dst_base + num_rows_to_skip * fixed_length;
+    for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
+      *reinterpret_cast<col1_type*>(dst) = reinterpret_cast<col1_type_const*>(src_A)[i];
+      *reinterpret_cast<col2_type*>(dst + sizeof(col1_type)) =
+          reinterpret_cast<col2_type_const*>(src_B)[i];
+      dst += fixed_length;
     }
-    if (col_width_A == 1) {
-      *dst = src_A[i];
-    } else if (col_width_A == 2) {
-      *reinterpret_cast<uint16_t*>(dst) = reinterpret_cast<const uint16_t*>(src_A)[i];
-    } else if (col_width_A == 4) {
-      *reinterpret_cast<uint32_t*>(dst) = reinterpret_cast<const uint32_t*>(src_A)[i];
-    } else if (col_width_A == 8) {
-      *reinterpret_cast<uint64_t*>(dst) = reinterpret_cast<const uint64_t*>(src_A)[i];
-    }
-    dst += col_width_A;
-    if (col_width_B == 1) {
-      *dst = src_B[i];
-    } else if (col_width_B == 2) {
-      *reinterpret_cast<uint16_t*>(dst) = reinterpret_cast<const uint16_t*>(src_B)[i];
-    } else if (col_width_B == 4) {
-      *reinterpret_cast<uint32_t*>(dst) = reinterpret_cast<const uint32_t*>(src_B)[i];
-    } else if (col_width_B == 8) {
-      *reinterpret_cast<uint64_t*>(dst) = reinterpret_cast<const uint64_t*>(src_B)[i];
+  } else {
+    for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
+      uint8_t* dst = dst_base + offsets[i];
+      *reinterpret_cast<col1_type*>(dst) = reinterpret_cast<col1_type_const*>(src_A)[i];
+      *reinterpret_cast<col2_type*>(dst + sizeof(col1_type)) =
+          reinterpret_cast<col2_type_const*>(src_B)[i];
     }
   }
 }
@@ -900,8 +954,9 @@ void KeyEncoder::EncoderBinaryPair::Decode(uint32_t start_row, uint32_t num_rows
   uint32_t num_processed = 0;
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2() && col_width1 == col_width2) {
-    uint32_t (*DecodeImp_avx2_fn[])(uint32_t, uint32_t, uint32_t, const KeyRowArray&,
-                                    KeyColumnArray&, KeyColumnArray&) = {
+    typedef uint32_t (*DecodeImp_avx2_t)(uint32_t, uint32_t, uint32_t, const KeyRowArray&,
+                                         KeyColumnArray&, KeyColumnArray&);
+    static const DecodeImp_avx2_t DecodeImp_avx2_fn[] = {
         DecodeImp_avx2<false, 1>, DecodeImp_avx2<false, 2>, DecodeImp_avx2<false, 4>,
         DecodeImp_avx2<false, 8>, DecodeImp_avx2<true, 1>,  DecodeImp_avx2<true, 2>,
         DecodeImp_avx2<true, 4>,  DecodeImp_avx2<true, 8>};
@@ -911,19 +966,25 @@ void KeyEncoder::EncoderBinaryPair::Decode(uint32_t start_row, uint32_t num_rows
   }
 #endif
   if (num_processed < num_rows) {
-    void (*DecodeImp_fn[])(uint32_t, uint32_t, uint32_t, uint32_t, const KeyRowArray&,
-                           KeyColumnArray&, KeyColumnArray&) = {
-        DecodeImp<false, 1, 1>, DecodeImp<false, 2, 1>, DecodeImp<false, 4, 1>,
-        DecodeImp<false, 8, 1>, DecodeImp<false, 1, 2>, DecodeImp<false, 2, 2>,
-        DecodeImp<false, 4, 2>, DecodeImp<false, 8, 2>, DecodeImp<false, 1, 4>,
-        DecodeImp<false, 2, 4>, DecodeImp<false, 4, 4>, DecodeImp<false, 8, 4>,
-        DecodeImp<false, 1, 8>, DecodeImp<false, 2, 8>, DecodeImp<false, 4, 8>,
-        DecodeImp<false, 8, 8>, DecodeImp<true, 1, 1>,  DecodeImp<true, 2, 1>,
-        DecodeImp<true, 4, 1>,  DecodeImp<true, 8, 1>,  DecodeImp<true, 1, 2>,
-        DecodeImp<true, 2, 2>,  DecodeImp<true, 4, 2>,  DecodeImp<true, 8, 2>,
-        DecodeImp<true, 1, 4>,  DecodeImp<true, 2, 4>,  DecodeImp<true, 4, 4>,
-        DecodeImp<true, 8, 4>,  DecodeImp<true, 1, 8>,  DecodeImp<true, 2, 8>,
-        DecodeImp<true, 4, 8>,  DecodeImp<true, 8, 8>};
+    typedef void (*DecodeImp_t)(uint32_t, uint32_t, uint32_t, uint32_t,
+                                const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
+    static const DecodeImp_t DecodeImp_fn[] = {
+        DecodeImp<false, uint8_t, uint8_t>,   DecodeImp<false, uint16_t, uint8_t>,
+        DecodeImp<false, uint32_t, uint8_t>,  DecodeImp<false, uint64_t, uint8_t>,
+        DecodeImp<false, uint8_t, uint16_t>,  DecodeImp<false, uint16_t, uint16_t>,
+        DecodeImp<false, uint32_t, uint16_t>, DecodeImp<false, uint64_t, uint16_t>,
+        DecodeImp<false, uint8_t, uint32_t>,  DecodeImp<false, uint16_t, uint32_t>,
+        DecodeImp<false, uint32_t, uint32_t>, DecodeImp<false, uint64_t, uint32_t>,
+        DecodeImp<false, uint8_t, uint64_t>,  DecodeImp<false, uint16_t, uint64_t>,
+        DecodeImp<false, uint32_t, uint64_t>, DecodeImp<false, uint64_t, uint64_t>,
+        DecodeImp<true, uint8_t, uint8_t>,    DecodeImp<true, uint16_t, uint8_t>,
+        DecodeImp<true, uint32_t, uint8_t>,   DecodeImp<true, uint64_t, uint8_t>,
+        DecodeImp<true, uint8_t, uint16_t>,   DecodeImp<true, uint16_t, uint16_t>,
+        DecodeImp<true, uint32_t, uint16_t>,  DecodeImp<true, uint64_t, uint16_t>,
+        DecodeImp<true, uint8_t, uint32_t>,   DecodeImp<true, uint16_t, uint32_t>,
+        DecodeImp<true, uint32_t, uint32_t>,  DecodeImp<true, uint64_t, uint32_t>,
+        DecodeImp<true, uint8_t, uint64_t>,   DecodeImp<true, uint16_t, uint64_t>,
+        DecodeImp<true, uint32_t, uint64_t>,  DecodeImp<true, uint64_t, uint64_t>};
     int dispatch_const =
         (log_col_width2 << 2) | log_col_width1 | (is_row_fixed_length ? 16 : 0);
     DecodeImp_fn[dispatch_const](num_processed, start_row, num_rows, *offset_within_row,
@@ -940,7 +1001,7 @@ void KeyEncoder::EncoderBinaryPair::Decode(uint32_t start_row, uint32_t num_rows
   *offset_within_row += col_width1 + col_width2;
 }
 
-template <bool is_row_fixed_length, int col_width_1, int col_width_2>
+template <bool is_row_fixed_length, typename col1_type, typename col2_type>
 void KeyEncoder::EncoderBinaryPair::DecodeImp(uint32_t num_rows_to_skip,
                                               uint32_t start_row, uint32_t num_rows,
                                               uint32_t offset_within_row,
@@ -952,34 +1013,35 @@ void KeyEncoder::EncoderBinaryPair::DecodeImp(uint32_t num_rows_to_skip,
 
   uint8_t* dst_A = col1.mutable_data(1);
   uint8_t* dst_B = col2.mutable_data(1);
-  uint32_t col_width_A = col1.get_metadata().fixed_length;
-  uint32_t col_width_B = col2.get_metadata().fixed_length;
 
-  for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
-    const uint8_t* src;
-    if (is_row_fixed_length) {
-      src = rows.data(1) + rows.get_metadata().fixed_length * i + offset_within_row;
-    } else {
-      src = rows.data(2) + rows.get_offsets()[i] + offset_within_row;
+  uint32_t fixed_length = rows.get_metadata().fixed_length;
+  const uint32_t* offsets;
+  const uint8_t* src_base;
+  if (is_row_fixed_length) {
+    src_base = rows.data(1) + fixed_length * start_row + offset_within_row;
+    offsets = nullptr;
+  } else {
+    src_base = rows.data(2) + offset_within_row;
+    offsets = rows.get_offsets() + start_row;
+  }
+
+  using col1_type_const = typename std::add_const<col1_type>::type;
+  using col2_type_const = typename std::add_const<col2_type>::type;
+
+  if (is_row_fixed_length) {
+    const uint8_t* src = src_base + num_rows_to_skip * fixed_length;
+    for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
+      reinterpret_cast<col1_type*>(dst_A)[i] = *reinterpret_cast<col1_type_const*>(src);
+      reinterpret_cast<col2_type*>(dst_B)[i] =
+          *reinterpret_cast<col2_type_const*>(src + sizeof(col1_type));
+      src += fixed_length;
     }
-    if (col_width_A == 1) {
-      dst_A[i] = *src;
-    } else if (col_width_A == 2) {
-      reinterpret_cast<uint16_t*>(dst_A)[i] = *reinterpret_cast<const uint16_t*>(src);
-    } else if (col_width_A == 4) {
-      reinterpret_cast<uint32_t*>(dst_A)[i] = *reinterpret_cast<const uint32_t*>(src);
-    } else if (col_width_A == 8) {
-      reinterpret_cast<uint64_t*>(dst_A)[i] = *reinterpret_cast<const uint64_t*>(src);
-    }
-    src += col_width_A;
-    if (col_width_B == 1) {
-      dst_B[i] = *src;
-    } else if (col_width_B == 2) {
-      reinterpret_cast<uint16_t*>(dst_B)[i] = *reinterpret_cast<const uint16_t*>(src);
-    } else if (col_width_B == 4) {
-      reinterpret_cast<uint32_t*>(dst_B)[i] = *reinterpret_cast<const uint32_t*>(src);
-    } else if (col_width_B == 8) {
-      reinterpret_cast<uint64_t*>(dst_B)[i] = *reinterpret_cast<const uint64_t*>(src);
+  } else {
+    for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
+      const uint8_t* src = src_base + offsets[i];
+      reinterpret_cast<col1_type*>(dst_A)[i] = *reinterpret_cast<col1_type_const*>(src);
+      reinterpret_cast<col2_type*>(dst_B)[i] =
+          *reinterpret_cast<col2_type_const*>(src + sizeof(col1_type));
     }
   }
 }
@@ -1011,7 +1073,7 @@ void KeyEncoder::EncoderOffsets::Encode(KeyRowArray& rows,
         ctx->stack, static_cast<uint32_t>(varbinary_cols.size()) * 8);
     auto temp_buffer_32B_per_col = KeyColumnArray(
         KeyColumnMetadata(true, sizeof(uint32_t)), varbinary_cols.size() * 8, nullptr,
-        temp_buffer_holder.mutable_data(), nullptr);
+        reinterpret_cast<uint8_t*>(temp_buffer_holder.mutable_data()), nullptr);
 
     num_processed = EncodeImp_avx2(rows, varbinary_cols, temp_buffer_32B_per_col);
   }
@@ -1022,18 +1084,16 @@ void KeyEncoder::EncoderOffsets::Encode(KeyRowArray& rows,
 }
 
 void KeyEncoder::EncoderOffsets::EncodeImp(
-    uint32_t num_rows_to_skip, KeyRowArray& rows,
+    uint32_t num_rows_already_processed, KeyRowArray& rows,
     const std::vector<KeyColumnArray>& varbinary_cols) {
   ARROW_DCHECK(varbinary_cols.size() > 0);
 
-  // Add together first offset in every column.
-  // This value will be mapped to zero when
-  // computing varying-length component of output row offsets.
-  int64_t sum_offsets_first = 0;
-  for (size_t col = 0; col < varbinary_cols.size(); ++col) {
-    ARROW_DCHECK(!varbinary_cols[col].get_metadata().is_fixed_length);
-    const uint32_t* col_offsets = varbinary_cols[col].get_offsets();
-    sum_offsets_first += col_offsets[0];
+  uint32_t* row_offsets = rows.get_mutable_offsets();
+  uint8_t* row_values = rows.mutable_data(2);
+  uint32_t num_rows = static_cast<uint32_t>(varbinary_cols[0].get_length());
+
+  if (num_rows_already_processed == 0) {
+    row_offsets[0] = 0;
   }
 
   // There is a fixed-length part in every row.
@@ -1041,19 +1101,24 @@ void KeyEncoder::EncoderOffsets::EncodeImp(
   int64_t fixed_part =
       rows.get_metadata().fixed_length + rows.get_metadata().cumulative_lengths_length;
 
+  // Add together offsets of every column for the first unprocessed row.
+  // This value will be mapped to already computed row offset for the first unprocessed
+  // row. If we are starting processing from beginning (number of already processed rows
+  // is zero), the row offset of the first unprocessed row will be set to zero first.
+  int64_t sum_offsets_start = 0;
+  for (size_t col = 0; col < varbinary_cols.size(); ++col) {
+    ARROW_DCHECK(!varbinary_cols[col].get_metadata().is_fixed_length);
+    const uint32_t* col_offsets = varbinary_cols[col].get_offsets();
+    sum_offsets_start += col_offsets[num_rows_already_processed];
+  }
+
   // Difference between output row offset and direct sum of offsets for all
   // columns
-  int64_t offset_adjustment = fixed_part - sum_offsets_first;
+  int64_t offset_adjustment =
+      row_offsets[num_rows_already_processed] - sum_offsets_start + fixed_part;
   int64_t offset_adjustment_incr = fixed_part;
 
-  uint32_t* row_offsets = rows.get_mutable_offsets();
-  uint8_t* row_values = rows.mutable_data(2);
-  uint32_t num_rows = static_cast<uint32_t>(varbinary_cols[0].get_length());
-
-  if (num_rows_to_skip == 0) {
-    row_offsets[0] = 0;
-  }
-  for (uint32_t i = num_rows_to_skip; i < num_rows; ++i) {
+  for (uint32_t i = num_rows_already_processed; i < num_rows; ++i) {
     uint32_t* cumulative_lengths = reinterpret_cast<uint32_t*>(
         row_values + row_offsets[i] + rows.get_metadata().fixed_length);
 
@@ -1087,6 +1152,7 @@ void KeyEncoder::EncoderOffsets::EncodeImp(
     // Add fixed-length part to row offsets
     int64_t row_offset = col_offset_sum + offset_adjustment;
     offset_adjustment += offset_adjustment_incr;
+    offset_adjustment -= col_null_length_sum;
 
     row_offsets[i + 1] = static_cast<uint32_t>(row_offset);
   }
@@ -1306,8 +1372,8 @@ Status KeyEncoder::PrepareOutputForEncode(int64_t start_row, int64_t num_rows,
   GetOutputBufferSizeForEncode(start_row, num_rows, row_metadata_, all_cols,
                                &num_bytes_required);
   rows.Clean();
-  RETURN_NOT_OK(rows.ResizeFixedLengthBuffers(num_rows));
-  RETURN_NOT_OK(rows.ResizeOptionalVaryingLengthBuffer(num_bytes_required));
+  RETURN_NOT_OK(rows.AppendEmpty(static_cast<uint32_t>(num_rows),
+                                 static_cast<uint32_t>(num_bytes_required)));
 
   return Status::OK();
 }
@@ -1333,14 +1399,15 @@ void KeyEncoder::PrepareMetadata(const std::vector<KeyColumnMetadata>& col_metad
       }
     }
   }
-  out_row_metadata->is_fixed_length = num_varbinary_cols > 0;
+  out_row_metadata->is_fixed_length = (num_varbinary_cols == 0);
   out_row_metadata->fixed_length = fixed_length;
   out_row_metadata->cumulative_lengths_length = sizeof(uint32_t) * num_varbinary_cols;
   // We set the number of bytes per row storing null masks of individual key columns
   // to be a power of two. This is not required. It could be also set to the minimal
   // number of bytes required for a given number of bits (one bit per column).
   out_row_metadata->null_masks_bytes_per_row = 1;
-  while (static_cast<uint32_t>(out_row_metadata->null_masks_bytes_per_row * 8) < num_cols) {
+  while (static_cast<uint32_t>(out_row_metadata->null_masks_bytes_per_row * 8) <
+         num_cols) {
     out_row_metadata->null_masks_bytes_per_row *= 2;
   }
 }
@@ -1408,14 +1475,14 @@ void KeyEncoder::Encode(int64_t start_row, int64_t num_rows, KeyRowArray& rows,
   // Create two temp vectors with 16-bit elements
   auto temp_buffer_holder_A =
       util::TempVectorHolder<uint16_t>(ctx_->stack, static_cast<uint32_t>(num_rows));
-  auto temp_buffer_A =
-      KeyColumnArray(KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
-                     temp_buffer_holder_A.mutable_data(), nullptr);
+  auto temp_buffer_A = KeyColumnArray(
+      KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
+      reinterpret_cast<uint8_t*>(temp_buffer_holder_A.mutable_data()), nullptr);
   auto temp_buffer_holder_B =
       util::TempVectorHolder<uint16_t>(ctx_->stack, static_cast<uint32_t>(num_rows));
-  auto temp_buffer_B =
-      KeyColumnArray(KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
-                     temp_buffer_holder_B.mutable_data(), nullptr);
+  auto temp_buffer_B = KeyColumnArray(
+      KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
+      reinterpret_cast<uint8_t*>(temp_buffer_holder_B.mutable_data()), nullptr);
 
   bool is_row_fixed_length = row_metadata_.is_fixed_length;
   if (!is_row_fixed_length) {
@@ -1425,7 +1492,7 @@ void KeyEncoder::Encode(int64_t start_row, int64_t num_rows, KeyRowArray& rows,
     EncoderOffsets::Encode(rows, batch_varbinary_cols_, ctx_);
 
     uint32_t num_varbinary_cols = static_cast<uint32_t>(batch_varbinary_cols_.size());
-    for (size_t i = 0; i < num_varbinary_cols; ++i) {
+    for (uint32_t i = 0; i < num_varbinary_cols; ++i) {
       // Memcpy varbinary fields into precomputed in the previous step
       // positions in the output row buffer.
       EncoderVarBinary::Encode(i, rows, batch_varbinary_cols_[i], ctx_);
@@ -1468,25 +1535,19 @@ void KeyEncoder::DecodeFixedLengthBuffers(int64_t start_row_input,
   // Create two temp vectors with 16-bit elements
   auto temp_buffer_holder_A =
       util::TempVectorHolder<uint16_t>(ctx_->stack, static_cast<uint32_t>(num_rows));
-  auto temp_buffer_A =
-      KeyColumnArray(KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
-                     temp_buffer_holder_A.mutable_data(), nullptr);
+  auto temp_buffer_A = KeyColumnArray(
+      KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
+      reinterpret_cast<uint8_t*>(temp_buffer_holder_A.mutable_data()), nullptr);
   auto temp_buffer_holder_B =
       util::TempVectorHolder<uint16_t>(ctx_->stack, static_cast<uint32_t>(num_rows));
-  auto temp_buffer_B =
-      KeyColumnArray(KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
-                     temp_buffer_holder_B.mutable_data(), nullptr);
-
-  uint32_t start_row_input_32bit = static_cast<uint32_t>(start_row_input);
-  uint32_t start_row_output_32bit = static_cast<uint32_t>(start_row_output);
-  uint32_t num_rows_32bit = static_cast<uint32_t>(num_rows);
+  auto temp_buffer_B = KeyColumnArray(
+      KeyColumnMetadata(true, sizeof(uint16_t)), num_rows, nullptr,
+      reinterpret_cast<uint8_t*>(temp_buffer_holder_B.mutable_data()), nullptr);
 
   bool is_row_fixed_length = row_metadata_.is_fixed_length;
   if (!is_row_fixed_length) {
-    // This call will generate and fill in data for both:
-    // - offsets to the entire encoded arrays
-    // - offsets for individual varbinary fields within each row
-    EncoderOffsets::Decode(start_row_output_32bit, num_rows_32bit, rows, batch_varbinary_cols_,
+    EncoderOffsets::Decode(static_cast<uint32_t>(start_row_input),
+                           static_cast<uint32_t>(num_rows), rows, batch_varbinary_cols_,
                            batch_varbinary_cols_base_offsets_, ctx_);
   }
 
@@ -1499,19 +1560,22 @@ void KeyEncoder::DecodeFixedLengthBuffers(int64_t start_row_input,
         EncoderBinaryPair::CanProcessPair(batch_fixedbinary_cols_[i].get_metadata(),
                                           batch_fixedbinary_cols_[i + 1].get_metadata());
     if (!can_process_pair) {
-      EncoderBinary::Decode(start_row_input_32bit, num_rows_32bit, &offset_within_row, rows,
+      EncoderBinary::Decode(static_cast<uint32_t>(start_row_input),
+                            static_cast<uint32_t>(num_rows), &offset_within_row, rows,
                             batch_fixedbinary_cols_[i], ctx_, temp_buffer_A);
       i += 1;
     } else {
       EncoderBinaryPair::Decode(
-          start_row_input_32bit, num_rows_32bit, &offset_within_row, rows, batch_fixedbinary_cols_[i],
+          static_cast<uint32_t>(start_row_input), static_cast<uint32_t>(num_rows),
+          &offset_within_row, rows, batch_fixedbinary_cols_[i],
           batch_fixedbinary_cols_[i + 1], ctx_, temp_buffer_A, temp_buffer_B);
       i += 2;
     }
   }
 
   // Process nulls
-  EncoderNulls::Decode(start_row_input_32bit, num_rows_32bit, rows, batch_all_cols_);
+  EncoderNulls::Decode(static_cast<uint32_t>(start_row_input),
+                       static_cast<uint32_t>(num_rows), rows, batch_all_cols_);
 }
 
 void KeyEncoder::DecodeVaryingLengthBuffers(int64_t start_row_input,
@@ -1526,15 +1590,15 @@ void KeyEncoder::DecodeVaryingLengthBuffers(int64_t start_row_input,
   bool is_row_fixed_length = row_metadata_.is_fixed_length;
   if (!is_row_fixed_length) {
     uint32_t num_varbinary_cols = static_cast<uint32_t>(batch_varbinary_cols_.size());
-    for (size_t i = 0; i < num_varbinary_cols; ++i) {
+    for (uint32_t i = 0; i < num_varbinary_cols; ++i) {
       // Memcpy varbinary fields into precomputed in the previous step
       // positions in the output row buffer.
-      EncoderVarBinary::Decode(static_cast<uint32_t>(start_row_input), 
+      EncoderVarBinary::Decode(static_cast<uint32_t>(start_row_input),
                                static_cast<uint32_t>(num_rows), i, rows,
                                batch_varbinary_cols_[i], ctx_);
     }
   }
 }
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

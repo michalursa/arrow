@@ -16,17 +16,18 @@
 // under the License.
 
 #pragma once
-#include "arrow/exec/common.h"
-#include "arrow/exec/groupby_hash.h"
-#include "arrow/exec/groupby_map.h"
-#include "arrow/exec/groupby_storage.h"
-#include "arrow/exec/util.h"
+
+#include "arrow/engine/key_compare.h"
+#include "arrow/engine/key_encode.h"
+#include "arrow/engine/key_hash.h"
+#include "arrow/engine/key_map.h"
+#include "arrow/engine/util.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 class GroupMap {
  public:
@@ -49,50 +50,35 @@ class GroupMap {
   void pull_output_varlen(uint8_t** non_null_buffers, uint8_t** fixedlen_buffers,
                           uint8_t** varlen_buffers_maybe_null);
 
-  uint64_t get_num_keys() const { return key_store.get_num_keys(); }
+  uint64_t get_num_keys() const { return rows_.get_length(); }
 
  private:
   static constexpr int log_minibatch_max = 10;
   static constexpr int minibatch_size_max = 1 << log_minibatch_max;
   static constexpr int minibatch_size_min = 128;
 
-  void equal_callback(int num_keys_to_compare, const uint16_t* selection_may_be_null,
-                      const uint32_t* group_ids, uint8_t* match_bitvector);
-  Status append_callback(int num_keys, const uint16_t* selection);
-
   int minibatch_size;
 
-  MemoryPool* memory_pool;
-  util::TempBufferAlloc temp_buffers;
-  KeyStore key_store;
-  util::CPUInstructionSet instruction_set;
-  SwissTable group_id_map;
+  MemoryPool* memory_pool_;
+  util::TempVectorStack temp_stack_;
+  KeyEncoder::KeyEncoderContext ctx_;
+  KeyEncoder::KeyRowArray rows_;
+  KeyEncoder::KeyRowArray rows_minibatch_;
+  KeyEncoder encoder_;
+  SwissTable map_;
 
-  // One element per input column
-  std::vector<uint32_t> col_widths;
-  std::vector<bool> is_col_fixed_len;
-  std::vector<const uint8_t*> col_non_nulls;
-  std::vector<const uint8_t*> varlen_col_non_nulls;
-  std::vector<const uint32_t*> col_offsets;
-  std::vector<const uint32_t*> varlen_col_offsets;
-  std::vector<const uint8_t*> col_values;
-  std::vector<uint8_t*> out_col_non_nulls;
-  std::vector<uint32_t*> out_col_offsets;
-  std::vector<uint8_t*> out_col_values;
+  std::vector<KeyEncoder::KeyColumnMetadata> col_metadata_;
+  std::vector<KeyEncoder::KeyColumnArray> cols_;
 
-  // Constant bit vectors used e.g. when null bit vector information for column is missing
-  std::vector<uint8_t> bit_vector_all_0;
-  std::vector<uint8_t> bit_vector_all_1;
+  std::vector<uint32_t> minibatch_hashes_;
 
-  std::vector<uint32_t> minibatch_hashes;
-  std::vector<uint32_t> minibatch_temp;
-
-  std::vector<uint8_t> minibatch_rows;
-  std::vector<uint32_t> minibatch_offsets;
-  std::vector<uint8_t> minibatch_nulls;
-  std::vector<uint8_t> minibatch_any_nulls_buffer;
-  const uint8_t* minibatch_any_nulls;
+  uint64_t cycles_encode_;
+  uint64_t cycles_hash_;
+  uint64_t cycles_map_;
+  uint64_t cycles_cmp_;
+  uint64_t stat_num_rows_;
+  uint64_t stat_num_rows_cmp_;
 };
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

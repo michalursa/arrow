@@ -17,11 +17,10 @@
 
 #include <immintrin.h>
 
-#include "arrow/exec/common.h"
-#include "arrow/exec/groupby_map.h"
+#include "arrow/engine/key_map.h"
 
 namespace arrow {
-namespace exec {
+namespace compute {
 
 #if defined(ARROW_HAVE_AVX2)
 
@@ -390,5 +389,5 @@ void SwissTable::lookup_1_avx2_x32(const int num_hashes, const uint32_t* hashes,
 
 #endif
 
-}  // namespace exec
+}  // namespace compute
 }  // namespace arrow

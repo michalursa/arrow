@@ -20,12 +20,11 @@
 #include <cstdint>
 #include <vector>
 
-#include "arrow/exec/common.h"
+#include "arrow/buffer.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/logging.h"
-#include "arrow/buffer.h"
 
 #if defined(__clang__) || defined(__GNUC__)
 #define BYTESWAP(x) __builtin_bswap64(x)
@@ -37,7 +36,6 @@
 #endif
 
 namespace arrow {
-namespace exec {
 namespace util {
 
 enum class CPUInstructionSet {
@@ -48,12 +46,13 @@ enum class CPUInstructionSet {
 
 /// Storage used to allocate temporary vectors of a batch size.
 /// Temporary vectors should resemble allocating temporary variables on the stack
-/// but in the context of vectorized processing where we need to store a vector of 
+/// but in the context of vectorized processing where we need to store a vector of
 /// temporaries instead of a single value.
-// TODO: Change to vector of exactly 32KB pages?
 class TempVectorStack {
-  template<typename> friend class TempVectorHolder;
-public:
+  template <typename>
+  friend class TempVectorHolder;
+
+ public:
   Status Init(MemoryPool* pool, int64_t size) {
     pool_ = pool;
     num_vectors_ = 0;
@@ -63,8 +62,9 @@ public:
     buffer_ = std::move(buffer);
     return Status::OK();
   }
-private:
-  void alloc(uint32_t num_bytes, uint8_t* &data, int &id) {
+
+ private:
+  void alloc(uint32_t num_bytes, uint8_t*& data, int& id) {
     int64_t old_top = top_;
     top_ += num_bytes + padding;
     // Stack overflow check
@@ -87,111 +87,24 @@ private:
   int64_t buffer_size_;
 };
 
-template<typename T>
+template <typename T>
 class TempVectorHolder {
   friend class TempVectorStack;
-public:
-  ~TempVectorHolder() {
-    stack_->release(id_, num_elements_ * sizeof(T));
-  }
-  uint8_t* mutable_data() { return data_; }
+
+ public:
+  ~TempVectorHolder() { stack_->release(id_, num_elements_ * sizeof(T)); }
+  T* mutable_data() { return reinterpret_cast<T*>(data_); }
   TempVectorHolder(TempVectorStack* stack, uint32_t num_elements) {
     stack_ = stack;
     num_elements_ = num_elements;
     stack_->alloc(num_elements * sizeof(T), data_, id_);
   }
-private:
+
+ private:
   TempVectorStack* stack_;
   uint8_t* data_;
   int id_;
   uint32_t num_elements_;
-};
-
-class TempBufferAlloc {
- public:
-  TempBufferAlloc() {}
-  ~TempBufferAlloc() {
-    for (size_t i = 0; i < pages_.size(); ++i) {
-      pool_->Free(pages_[i], elements_per_page_ * max_element_bytes_ + padding_);
-    }
-  }
-  Status init(MemoryPool* pool, int32_t num_elements) {
-    pool_ = pool;
-    elements_per_page_ = num_elements;
-    ARROW_DCHECK(pages_.empty());
-    ARROW_RETURN_NOT_OK(alloc_page());
-    page_to_use_ = 0;
-    return Status::OK();
-  }
-  inline Status allocate_buffer(uint8_t*& buffer, uint32_t num_element_bytes) {
-    ARROW_DCHECK(num_element_bytes <= elements_per_page_);
-    if (max_element_bytes_ - page_bytes_allocated_[page_to_use_] <
-        static_cast<int>(num_element_bytes)) {
-      if (page_to_use_ == static_cast<int>(pages_.size()) - 1) {
-        ARROW_RETURN_NOT_OK(alloc_page());
-      }
-      page_to_use_++;
-    }
-    buffer =
-        pages_[page_to_use_] + page_bytes_allocated_[page_to_use_] * elements_per_page_;
-    page_bytes_allocated_[page_to_use_] += num_element_bytes;
-    allocated_sizes_.push_back(num_element_bytes);
-    return Status::OK();
-  }
-  void release_buffer(int num_element_bytes) {
-    ARROW_DCHECK(num_element_bytes == allocated_sizes_.back());
-    allocated_sizes_.pop_back();
-    page_bytes_allocated_[page_to_use_] -= num_element_bytes;
-    if (page_bytes_allocated_[page_to_use_] == 0 && page_to_use_ > 0 &&
-        page_bytes_allocated_[page_to_use_ - 1] < max_element_bytes_) {
-      --page_to_use_;
-    }
-  }
-  int32_t get_num_elements() const { return elements_per_page_; }
-  static constexpr int max_element_bytes_ = 16;
-
- private:
-  Status alloc_page() {
-    uint8_t* new_page;
-    ARROW_RETURN_NOT_OK(
-        pool_->Allocate(elements_per_page_ * max_element_bytes_ + padding_, &new_page));
-    pages_.push_back(new_page);
-    page_bytes_allocated_.push_back(0);
-    return Status::OK();
-  }
-  // Padding at the end of the buffer that may be needed for SIMD
-  static constexpr uint32_t padding_ = 64;
-  uint32_t elements_per_page_;
-  MemoryPool* pool_;
-  int page_to_use_;
-  std::vector<uint8_t*> pages_;
-  std::vector<int> page_bytes_allocated_;
-  // TODO: This is only used in DEBUG
-  std::vector<int> allocated_sizes_;
-};
-
-template <typename T>
-class TempBuffer {
- public:
-  explicit TempBuffer(TempBufferAlloc* alloc, int multiplicity = 1)
-      : alloc_(alloc), multiplicity_(multiplicity), buffer_() {
-    ARROW_DCHECK(multiplicity > 0);
-    ARROW_DCHECK(sizeof(T) * multiplicity <= TempBufferAlloc::max_element_bytes_);
-  }
-  ~TempBuffer() {
-    if (buffer_) {
-      alloc_->release_buffer(sizeof(T) * multiplicity_);
-    }
-  }
-  inline Status alloc() {
-    return alloc_->allocate_buffer(buffer_, sizeof(T) * multiplicity_);
-  }
-  T* mutable_data() { return reinterpret_cast<T*>(buffer_); }
-
- private:
-  TempBufferAlloc* alloc_;
-  int multiplicity_;
-  uint8_t* buffer_;
 };
 
 class BitUtil {
@@ -200,7 +113,6 @@ class BitUtil {
   static void bits_to_indexes(CPUInstructionSet instruction_set, const int num_bits,
                               const uint8_t* bits, int& num_indexes, uint16_t* indexes);
 
-  // Input and output indexes may be pointing to the same data (in-place filtering).
   template <int bit_to_search = 1>
   static void bits_filter_indexes(CPUInstructionSet instruction_set, const int num_bits,
                                   const uint8_t* bits, const uint16_t* input_indexes,
@@ -211,14 +123,15 @@ class BitUtil {
                                  const uint8_t* bits, int& num_indexes_bit0,
                                  uint16_t* indexes_bit0, uint16_t* indexes_bit1);
 
+  // Bit 1 is replaced with byte 0xFF.
   static void bits_to_bytes(CPUInstructionSet instruction_set, const int num_bits,
                             const uint8_t* bits, uint8_t* bytes);
+  // Return highest bit of each byte.
   static void bytes_to_bits(CPUInstructionSet instruction_set, const int num_bits,
                             const uint8_t* bytes, uint8_t* bits);
 
-  static void bit_vector_lookup(CPUInstructionSet instruction_set, const int num_lookups,
-                                const uint32_t* bit_ids, const uint8_t* bits,
-                                uint8_t* result);
+  static bool are_all_bytes_zero(CPUInstructionSet instruction_set, const uint8_t* bytes,
+                                 uint32_t num_bytes);
 
  private:
   inline static void bits_to_indexes_helper(uint64_t word, uint16_t base_index,
@@ -246,11 +159,9 @@ class BitUtil {
                                        uint16_t* indexes);
   static void bits_to_bytes_avx2(const int num_bits, const uint8_t* bits, uint8_t* bytes);
   static void bytes_to_bits_avx2(const int num_bits, const uint8_t* bytes, uint8_t* bits);
-  static void bit_vector_lookup_avx2(const int num_lookups, const uint32_t* bit_ids,
-                                     const uint8_t* bits, uint8_t* result);
+  static bool are_all_bytes_zero_avx2(const uint8_t* bytes, uint32_t num_bytes);
 #endif
 };
 
 }  // namespace util
-}  // namespace exec
 }  // namespace arrow
