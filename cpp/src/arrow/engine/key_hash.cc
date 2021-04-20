@@ -61,7 +61,7 @@ void Hashing::avalanche(util::CPUInstructionSet instruction_set, uint32_t num_ke
 
 inline uint32_t Hashing::combine_accumulators(const uint32_t acc1, const uint32_t acc2,
                                               const uint32_t acc3, const uint32_t acc4) {
-  return _rotl(acc1, 1) + _rotl(acc2, 7) + _rotl(acc3, 12) + _rotl(acc4, 18);
+  return ROTL(acc1, 1) + ROTL(acc2, 7) + ROTL(acc3, 12) + ROTL(acc4, 18);
 }
 
 inline void Hashing::helper_8B(uint32_t key_length, uint32_t num_keys,
@@ -91,13 +91,13 @@ inline void Hashing::helper_stripe(uint32_t offset, uint64_t mask_hi, const uint
   uint32_t x3 = static_cast<uint32_t>(v2);
   uint32_t x4 = static_cast<uint32_t>(v2 >> 32);
   acc1 += x1 * PRIME32_2;
-  acc1 = _rotl(acc1, 13) * PRIME32_1;
+  acc1 = ROTL(acc1, 13) * PRIME32_1;
   acc2 += x2 * PRIME32_2;
-  acc2 = _rotl(acc2, 13) * PRIME32_1;
+  acc2 = ROTL(acc2, 13) * PRIME32_1;
   acc3 += x3 * PRIME32_2;
-  acc3 = _rotl(acc3, 13) * PRIME32_1;
+  acc3 = ROTL(acc3, 13) * PRIME32_1;
   acc4 += x4 * PRIME32_2;
-  acc4 = _rotl(acc4, 13) * PRIME32_1;
+  acc4 = ROTL(acc4, 13) * PRIME32_1;
 }
 
 void Hashing::helper_stripes(util::CPUInstructionSet instruction_set, uint32_t num_keys,
@@ -143,9 +143,9 @@ inline uint32_t Hashing::helper_tail(uint32_t offset, uint64_t mask, const uint8
   uint32_t x1 = static_cast<uint32_t>(v);
   uint32_t x2 = static_cast<uint32_t>(v >> 32);
   acc += x1 * PRIME32_3;
-  acc = _rotl(acc, 17) * PRIME32_4;
+  acc = ROTL(acc, 17) * PRIME32_4;
   acc += x2 * PRIME32_3;
-  acc = _rotl(acc, 17) * PRIME32_4;
+  acc = ROTL(acc, 17) * PRIME32_4;
   return acc;
 }
 
@@ -188,7 +188,7 @@ void Hashing::hash_varlen_helper(uint32_t length, const uint8_t* key, uint32_t* 
     for (int j = 0; j < 4; ++j) {
       uint32_t lane = reinterpret_cast<const uint32_t*>(key)[i * 4 + j];
       acc[j] += (lane * PRIME32_2);
-      acc[j] = _rotl(acc[j], 13);
+      acc[j] = ROTL(acc[j], 13);
       acc[j] *= PRIME32_1;
     }
   }
@@ -210,7 +210,7 @@ void Hashing::hash_varlen_helper(uint32_t length, const uint8_t* key, uint32_t* 
     for (int j = 0; j < 4; ++j) {
       uint32_t lane = reinterpret_cast<const uint32_t*>(last_stripe)[j];
       acc[j] += (lane * PRIME32_2);
-      acc[j] = _rotl(acc[j], 13);
+      acc[j] = ROTL(acc[j], 13);
       acc[j] *= PRIME32_1;
     }
   }

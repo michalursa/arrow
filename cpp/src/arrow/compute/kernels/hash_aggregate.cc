@@ -35,6 +35,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/visitor_inline.h"
+#include "arrow/util/cpu_info.h"
 
 namespace arrow {
 
@@ -470,7 +471,15 @@ struct GrouperFastImpl : Grouper {
       impl->key_types_[i] = key;
     }
 
-    RETURN_NOT_OK(impl->group_map_.init(util::CPUInstructionSet::avx2,
+    bool has_avx2 = false;
+#if defined(ARROW_HAVE_AVX2)
+    static const auto cpu_info = arrow::internal::CpuInfo::GetInstance();
+    has_avx2 = cpu_info->IsSupported(arrow::internal::CpuInfo::AVX2);
+#endif
+
+    RETURN_NOT_OK(impl->group_map_.init(has_avx2 ?
+                                        util::CPUInstructionSet::avx2 :
+                                        util::CPUInstructionSet::scalar,
                                         ctx->memory_pool(),
                                         static_cast<uint32_t>(keys.size()),
                                         impl->is_fixedlen_, impl->col_widths_.data()));
@@ -568,7 +577,7 @@ struct GrouperFastImpl : Grouper {
     for (size_t i = 0; i < num_columns; ++i) {
       auto valid_count = arrow::internal::CountSetBits(non_null_arrays[i], /*offset=*/0,
                                                        static_cast<int64_t>(num_groups));
-      null_counts[i] = static_cast<int>(num_groups) - valid_count;
+      null_counts[i] = static_cast<int>(num_groups) - static_cast<int>(valid_count);
 
       if (!is_fixedlen_[i]) {
         ARROW_ASSIGN_OR_RAISE(varlen_bufs[i],

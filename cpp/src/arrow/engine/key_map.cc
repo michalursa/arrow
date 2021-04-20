@@ -234,7 +234,7 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
 
   // Append any unprocessed entries
   if (num_processed < inout_num_selected) {
-    memcpy(ids[category_nomatch] + num_ids[category_nomatch],
+    memmove(ids[category_nomatch] + num_ids[category_nomatch],
            inout_selection + num_processed,
            sizeof(uint16_t) * (inout_num_selected - num_processed));
     num_ids[category_nomatch] += (inout_num_selected - num_processed);
