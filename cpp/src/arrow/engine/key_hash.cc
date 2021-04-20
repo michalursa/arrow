@@ -223,9 +223,8 @@ void Hashing::hash_varlen(util::CPUInstructionSet instruction_set, uint32_t num_
 #if defined(ARROW_HAVE_AVX2)
   if (instruction_set == util::CPUInstructionSet::avx2) {
     hash_varlen_avx2(num_rows, offsets, concatenated_keys, temp_buffer, hashes);
-  } else
+  } else {
 #endif
-  {
     for (uint32_t i = 0; i < num_rows; ++i) {
       uint32_t acc[4];
       acc[0] = static_cast<uint32_t>(
@@ -239,7 +238,9 @@ void Hashing::hash_varlen(util::CPUInstructionSet instruction_set, uint32_t num_
       hashes[i] = combine_accumulators(acc[0], acc[1], acc[2], acc[3]);
     }
     avalanche(util::CPUInstructionSet::scalar, num_rows, hashes);
+#if defined(ARROW_HAVE_AVX2)
   }
+#endif
 }
 
 }  // namespace compute

@@ -15,14 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <limits>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
-
-#include <gtest/gtest.h>
 
 #include "arrow/array.h"
 #include "arrow/chunked_array.h"
@@ -189,13 +189,19 @@ struct TestGrouper {
     int64_t num_ids = left->length();
     auto left_data = left->data();
     auto right_data = right->data();
-    const uint32_t* left_ids = reinterpret_cast<const uint32_t*>(left_data->buffers[1]->data());
-    const uint32_t* right_ids = reinterpret_cast<const uint32_t*>(right_data->buffers[1]->data());
+    const uint32_t* left_ids =
+        reinterpret_cast<const uint32_t*>(left_data->buffers[1]->data());
+    const uint32_t* right_ids =
+        reinterpret_cast<const uint32_t*>(right_data->buffers[1]->data());
     uint32_t max_left_id = 0;
     uint32_t max_right_id = 0;
     for (int64_t i = 0; i < num_ids; ++i) {
-      if (left_ids[i] > max_left_id) { max_left_id = left_ids[i]; }
-      if (right_ids[i] > max_right_id) { max_right_id = right_ids[i]; }
+      if (left_ids[i] > max_left_id) {
+        max_left_id = left_ids[i];
+      }
+      if (right_ids[i] > max_right_id) {
+        max_right_id = right_ids[i];
+      }
     }
     std::vector<bool> right_to_left_present;
     std::vector<bool> left_to_right_present;

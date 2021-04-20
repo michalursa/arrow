@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/compute/api_aggregate.h"
-
 #include <functional>
 #include <memory>
 #include <string>
@@ -24,6 +22,7 @@
 #include <vector>
 
 #include "arrow/buffer_builder.h"
+#include "arrow/compute/api_aggregate.h"
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/kernel.h"
@@ -33,9 +32,9 @@
 #include "arrow/util/bit_run_reader.h"
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/checked_cast.h"
+#include "arrow/util/cpu_info.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/visitor_inline.h"
-#include "arrow/util/cpu_info.h"
 
 namespace arrow {
 
@@ -477,12 +476,10 @@ struct GrouperFastImpl : Grouper {
     has_avx2 = cpu_info->IsSupported(arrow::internal::CpuInfo::AVX2);
 #endif
 
-    RETURN_NOT_OK(impl->group_map_.init(has_avx2 ?
-                                        util::CPUInstructionSet::avx2 :
-                                        util::CPUInstructionSet::scalar,
-                                        ctx->memory_pool(),
-                                        static_cast<uint32_t>(keys.size()),
-                                        impl->is_fixedlen_, impl->col_widths_.data()));
+    RETURN_NOT_OK(impl->group_map_.init(
+        has_avx2 ? util::CPUInstructionSet::avx2 : util::CPUInstructionSet::scalar,
+        ctx->memory_pool(), static_cast<uint32_t>(keys.size()), impl->is_fixedlen_,
+        impl->col_widths_.data()));
 
     return std::move(impl);
   }
@@ -551,22 +548,25 @@ struct GrouperFastImpl : Grouper {
     constexpr int padding_bits = 64;
     constexpr int padding_for_SIMD = 32;
     for (size_t i = 0; i < num_columns; ++i) {
-      ARROW_ASSIGN_OR_RAISE(non_null_bufs[i],
-                            AllocateBitmap(num_groups + padding_bits, ctx_->memory_pool()));
+      ARROW_ASSIGN_OR_RAISE(non_null_bufs[i], AllocateBitmap(num_groups + padding_bits,
+                                                             ctx_->memory_pool()));
       non_null_arrays[i] = non_null_bufs[i]->mutable_data();
       if (is_fixedlen_[i]) {
         if (col_widths_[i] == 0) {
-          ARROW_ASSIGN_OR_RAISE(fixedlen_bufs[i],
-                                AllocateBitmap(num_groups + padding_bits, ctx_->memory_pool()));
+          ARROW_ASSIGN_OR_RAISE(
+              fixedlen_bufs[i],
+              AllocateBitmap(num_groups + padding_bits, ctx_->memory_pool()));
         } else {
           ARROW_ASSIGN_OR_RAISE(
               fixedlen_bufs[i],
-              AllocateBuffer(num_groups * col_widths_[i] + padding_for_SIMD, ctx_->memory_pool()));
+              AllocateBuffer(num_groups * col_widths_[i] + padding_for_SIMD,
+                             ctx_->memory_pool()));
         }
       } else {
         ARROW_ASSIGN_OR_RAISE(
             fixedlen_bufs[i],
-            AllocateBuffer((num_groups + 1) * sizeof(uint32_t) + padding_for_SIMD, ctx_->memory_pool()));
+            AllocateBuffer((num_groups + 1) * sizeof(uint32_t) + padding_for_SIMD,
+                           ctx_->memory_pool()));
       }
       fixedlen_arrays[i] = fixedlen_bufs[i]->mutable_data();
     }
@@ -580,8 +580,9 @@ struct GrouperFastImpl : Grouper {
       null_counts[i] = static_cast<int>(num_groups) - static_cast<int>(valid_count);
 
       if (!is_fixedlen_[i]) {
-        ARROW_ASSIGN_OR_RAISE(varlen_bufs[i],
-                              AllocateBuffer(varlen_sizes[i] + padding_for_SIMD, ctx_->memory_pool()));
+        ARROW_ASSIGN_OR_RAISE(
+            varlen_bufs[i],
+            AllocateBuffer(varlen_sizes[i] + padding_for_SIMD, ctx_->memory_pool()));
         varlen_arrays[i] = varlen_bufs[i]->mutable_data();
       } else {
         varlen_arrays[i] = nullptr;

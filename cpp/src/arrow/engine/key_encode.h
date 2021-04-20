@@ -180,7 +180,7 @@ class KeyEncoder {
       return reinterpret_cast<const uint32_t*>(data(1));
     }
     const KeyColumnMetadata& get_metadata() const { return metadata_; }
-    int64_t get_length() const { return length_; };
+    int64_t get_length() const { return length_; }
 
    private:
     static constexpr int max_buffers_ = 3;
@@ -327,9 +327,7 @@ class KeyEncoder {
    public:
     static bool CanProcessPair(const KeyColumnMetadata& col1,
                                const KeyColumnMetadata& col2) {
-      return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2) /*&&
-             col1.fixed_length == col2.fixed_length*/
-          ;
+      return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2);
     }
     static void Encode(uint32_t* offset_within_row, KeyRowArray& rows,
                        const KeyColumnArray& col1, const KeyColumnArray& col2,

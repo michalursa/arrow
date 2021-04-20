@@ -210,9 +210,8 @@ void KeyCompare::CompareVaryingLength(uint32_t num_rows_to_compare,
   if (ctx->has_avx2() && !use_selection) {
     CompareVaryingLength_avx2(num_rows_to_compare, left_to_right_map, match_bytevector,
                               rows_left, rows_right, offsets_left, offsets_right);
-  } else
+  } else {
 #endif
-  {
     if (use_selection) {
       CompareVaryingLengthImp<true>(num_rows_to_compare, sel_left_maybe_null,
                                     left_to_right_map, match_bytevector, rows_left,
@@ -222,7 +221,9 @@ void KeyCompare::CompareVaryingLength(uint32_t num_rows_to_compare,
                                      left_to_right_map, match_bytevector, rows_left,
                                      rows_right, offsets_left, offsets_right);
     }
+#if defined(ARROW_HAVE_AVX2)
   }
+#endif
 }
 
 template <bool use_selection>

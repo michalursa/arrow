@@ -23,6 +23,7 @@
 #include <x86intrin.h>
 #endif
 #include <memory.h>
+
 #include <algorithm>
 #include <cstdint>
 
@@ -69,8 +70,8 @@ Status GroupMap::init(util::CPUInstructionSet instruction_set_in, MemoryPool* po
     return rows_.AppendSelectionFrom(rows_minibatch_, num_keys, selection);
   };
 
-  RETURN_NOT_OK(map_.init(ctx_.instr, memory_pool_, ctx_.stack, log_minibatch_max, equal_func,
-                append_func));
+  RETURN_NOT_OK(map_.init(ctx_.instr, memory_pool_, ctx_.stack, log_minibatch_max,
+                          equal_func, append_func));
 
   cols_.resize(num_columns);
 
@@ -106,7 +107,8 @@ Status GroupMap::push_input(uint32_t num_rows,
 
     // Encode
     rows_minibatch_.Clean();
-    RETURN_NOT_OK(encoder_.PrepareOutputForEncode(start_row, batch_size_next, rows_minibatch_, cols_));
+    RETURN_NOT_OK(encoder_.PrepareOutputForEncode(start_row, batch_size_next,
+                                                  rows_minibatch_, cols_));
     encoder_.Encode(start_row, batch_size_next, rows_minibatch_, cols_);
     uint64_t c1 = __rdtsc();
 
