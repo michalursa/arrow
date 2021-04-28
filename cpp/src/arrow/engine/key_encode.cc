@@ -18,6 +18,7 @@
 #include "arrow/engine/key_encode.h"
 
 #include <memory.h>
+
 #include <algorithm>
 
 #include "arrow/engine/util.h"
@@ -621,11 +622,7 @@ void KeyEncoder::EncoderBinary::Encode(uint32_t* offset_within_row, KeyRowArray&
 
 #if defined(ARROW_HAVE_AVX2)
     if (ctx->has_avx2()) {
-      if (is_row_fixed_length) {
-        EncodeImp_avx2<true>(*offset_within_row, rows, col);
-      } else {
-        EncodeImp_avx2<false>(*offset_within_row, rows, col);
-      }
+      EncodeHelper_avx2(is_row_fixed_length, *offset_within_row, rows, col);
     } else {
 #endif
       if (is_row_fixed_length) {
@@ -667,11 +664,8 @@ void KeyEncoder::EncoderBinary::Decode(uint32_t start_row, uint32_t num_rows,
 
 #if defined(ARROW_HAVE_AVX2)
     if (ctx->has_avx2()) {
-      if (is_row_fixed_length) {
-        DecodeImp_avx2<true>(start_row, num_rows, *offset_within_row, rows, col);
-      } else {
-        DecodeImp_avx2<false>(start_row, num_rows, *offset_within_row, rows, col);
-      }
+      DecodeHelper_avx2(is_row_fixed_length, start_row, num_rows, *offset_within_row,
+                        rows, col);
     } else {
 #endif
       if (is_row_fixed_length) {
@@ -764,8 +758,8 @@ void KeyEncoder::EncoderBinary::ColumnMemsetNullsImp(
 
   // Bit vector to index vector of null positions
   int num_selected;
-  util::BitUtil::bits_to_indexes<0>(ctx->instr, static_cast<int>(col.get_length()),
-                                    col.data(0), num_selected, temp_vector);
+  util::BitUtil::bits_to_indexes(0, ctx->instr, static_cast<int>(col.get_length()),
+                                 col.data(0), num_selected, temp_vector);
 
   for (int i = 0; i < num_selected; ++i) {
     uint32_t row_id = temp_vector[i];
@@ -841,15 +835,7 @@ void KeyEncoder::EncoderBinaryPair::Encode(uint32_t* offset_within_row, KeyRowAr
   uint32_t num_processed = 0;
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2() && col_width1 == col_width2) {
-    typedef uint32_t (*EncodeImp_avx2_t)(uint32_t, KeyRowArray&, const KeyColumnArray&,
-                                         const KeyColumnArray&);
-    static const EncodeImp_avx2_t EncodeImp_avx2_fn[] = {
-        EncodeImp_avx2<false, 1>, EncodeImp_avx2<false, 2>, EncodeImp_avx2<false, 4>,
-        EncodeImp_avx2<false, 8>, EncodeImp_avx2<true, 1>,  EncodeImp_avx2<true, 2>,
-        EncodeImp_avx2<true, 4>,  EncodeImp_avx2<true, 8>};
-    int dispatch_const = (is_row_fixed_length ? 4 : 0) + log_col_width1;
-    num_processed = EncodeImp_avx2_fn[dispatch_const](*offset_within_row, rows,
-                                                      col_prep[0], col_prep[1]);
+    num_processed = EncodeHelper_avx2(*offset_within_row, rows, col_prep[0], col_prep[1]);
   }
 #endif
   if (num_processed < num_rows) {
@@ -954,15 +940,9 @@ void KeyEncoder::EncoderBinaryPair::Decode(uint32_t start_row, uint32_t num_rows
   uint32_t num_processed = 0;
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2() && col_width1 == col_width2) {
-    typedef uint32_t (*DecodeImp_avx2_t)(uint32_t, uint32_t, uint32_t, const KeyRowArray&,
-                                         KeyColumnArray&, KeyColumnArray&);
-    static const DecodeImp_avx2_t DecodeImp_avx2_fn[] = {
-        DecodeImp_avx2<false, 1>, DecodeImp_avx2<false, 2>, DecodeImp_avx2<false, 4>,
-        DecodeImp_avx2<false, 8>, DecodeImp_avx2<true, 1>,  DecodeImp_avx2<true, 2>,
-        DecodeImp_avx2<true, 4>,  DecodeImp_avx2<true, 8>};
-    int dispatch_const = log_col_width1 | (is_row_fixed_length ? 4 : 0);
-    num_processed = DecodeImp_avx2_fn[dispatch_const](
-        start_row, num_processed, *offset_within_row, rows, col_prep[0], col_prep[1]);
+    num_processed =
+        DecodeHelper_avx2(is_row_fixed_length, col_width1, start_row, num_rows,
+                          *offset_within_row, rows, col_prep[0], col_prep[1]);
   }
 #endif
   if (num_processed < num_rows) {
@@ -1217,11 +1197,7 @@ void KeyEncoder::EncoderVarBinary::Encode(uint32_t varbinary_col_id, KeyRowArray
                                           KeyEncoderContext* ctx) {
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2()) {
-    if (varbinary_col_id == 0) {
-      EncodeImp_avx2<true>(varbinary_col_id, rows, col);
-    } else {
-      EncodeImp_avx2<false>(varbinary_col_id, rows, col);
-    }
+    EncodeHelper_avx2(varbinary_col_id, rows, col);
   } else {
 #endif
     if (varbinary_col_id == 0) {
@@ -1242,11 +1218,7 @@ void KeyEncoder::EncoderVarBinary::Decode(uint32_t start_row, uint32_t num_rows,
   // at the end in avx2 version and 8B otherwise.
 #if defined(ARROW_HAVE_AVX2)
   if (ctx->has_avx2()) {
-    if (varbinary_col_id == 0) {
-      DecodeImp_avx2<true>(start_row, num_rows, varbinary_col_id, rows, col);
-    } else {
-      DecodeImp_avx2<false>(start_row, num_rows, varbinary_col_id, rows, col);
-    }
+    DecodeHelper_avx2(start_row, num_rows, varbinary_col_id, rows, col);
   } else {
 #endif
     if (varbinary_col_id == 0) {
@@ -1321,8 +1293,8 @@ void KeyEncoder::EncoderNulls::Encode(KeyRowArray& rows,
       continue;
     }
     int num_selected;
-    util::BitUtil::bits_to_indexes<0>(
-        ctx->instr, num_rows, non_nulls, num_selected,
+    util::BitUtil::bits_to_indexes(
+        0, ctx->instr, num_rows, non_nulls, num_selected,
         reinterpret_cast<uint16_t*>(temp_vector_16bit.mutable_data(1)));
     for (int i = 0; i < num_selected; ++i) {
       uint16_t row_id = reinterpret_cast<const uint16_t*>(temp_vector_16bit.data(1))[i];

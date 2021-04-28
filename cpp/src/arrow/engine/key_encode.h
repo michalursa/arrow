@@ -305,6 +305,11 @@ class KeyEncoder {
                           uint32_t offset_within_row, const KeyRowArray& rows,
                           KeyColumnArray& col);
 #if defined(ARROW_HAVE_AVX2)
+    static void EncodeHelper_avx2(bool is_row_fixed_length, uint32_t offset_within_row,
+                                  KeyRowArray& rows, const KeyColumnArray& col);
+    static void DecodeHelper_avx2(bool is_row_fixed_length, uint32_t start_row,
+                                  uint32_t num_rows, uint32_t offset_within_row,
+                                  const KeyRowArray& rows, KeyColumnArray& col);
     template <bool is_row_fixed_length>
     static void EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray& rows,
                                const KeyColumnArray& col);
@@ -349,6 +354,14 @@ class KeyEncoder {
                           const KeyRowArray& rows, KeyColumnArray& col1,
                           KeyColumnArray& col2);
 #if defined(ARROW_HAVE_AVX2)
+    static uint32_t EncodeHelper_avx2(bool is_row_fixed_length, uint32_t col_width,
+                                      uint32_t offset_within_row, KeyRowArray& rows,
+                                      const KeyColumnArray& col1,
+                                      const KeyColumnArray& col2);
+    static uint32_t DecodeHelper_avx2(bool is_row_fixed_length, uint32_t col_width,
+                                      uint32_t start_row, uint32_t num_rows,
+                                      uint32_t offset_within_row, const KeyRowArray& rows,
+                                      KeyColumnArray& col1, KeyColumnArray& col2);
     template <bool is_row_fixed_length, uint32_t col_width>
     static uint32_t EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray& rows,
                                    const KeyColumnArray& col1,
@@ -410,6 +423,11 @@ class KeyEncoder {
                           uint32_t varbinary_col_id, const KeyRowArray& rows,
                           KeyColumnArray& col);
 #if defined(ARROW_HAVE_AVX2)
+    static void EncodeHelper_avx2(uint32_t varbinary_col_id, KeyRowArray& rows,
+                                  const KeyColumnArray& col);
+    static void DecodeHelper_avx2(uint32_t start_row, uint32_t num_rows,
+                                  uint32_t varbinary_col_id, const KeyRowArray& rows,
+                                  KeyColumnArray& col);
     template <bool first_varbinary_col>
     static void EncodeImp_avx2(uint32_t varbinary_col_id, KeyRowArray& rows,
                                const KeyColumnArray& col);

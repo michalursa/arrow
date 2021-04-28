@@ -54,11 +54,10 @@ class TempVectorStack {
 
  public:
   Status Init(MemoryPool* pool, int64_t size) {
-    pool_ = pool;
     num_vectors_ = 0;
     top_ = 0;
     buffer_size_ = size;
-    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(size, pool_));
+    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(size, pool));
     buffer_ = std::move(buffer);
     return Status::OK();
   }
@@ -80,10 +79,9 @@ class TempVectorStack {
     --num_vectors_;
   }
   static constexpr int64_t padding = 64;
-  MemoryPool* pool_;
   int num_vectors_;
   int64_t top_;
-  std::unique_ptr<ResizableBuffer> buffer_;
+  std::unique_ptr<Buffer> buffer_;
   int64_t buffer_size_;
 };
 
@@ -109,14 +107,14 @@ class TempVectorHolder {
 
 class BitUtil {
  public:
-  template <int bit_to_search = 1>
-  static void bits_to_indexes(CPUInstructionSet instruction_set, const int num_bits,
-                              const uint8_t* bits, int& num_indexes, uint16_t* indexes);
+  static void bits_to_indexes(int bit_to_search, CPUInstructionSet instruction_set,
+                              const int num_bits, const uint8_t* bits, int& num_indexes,
+                              uint16_t* indexes);
 
-  template <int bit_to_search = 1>
-  static void bits_filter_indexes(CPUInstructionSet instruction_set, const int num_bits,
-                                  const uint8_t* bits, const uint16_t* input_indexes,
-                                  int& num_indexes, uint16_t* indexes);
+  static void bits_filter_indexes(int bit_to_search, CPUInstructionSet instruction_set,
+                                  const int num_bits, const uint8_t* bits,
+                                  const uint16_t* input_indexes, int& num_indexes,
+                                  uint16_t* indexes);
 
   // Input and output indexes may be pointing to the same data (in-place filtering).
   static void bits_split_indexes(CPUInstructionSet instruction_set, const int num_bits,
@@ -150,13 +148,19 @@ class BitUtil {
                                      uint8_t* bits);
 
 #if defined(ARROW_HAVE_AVX2)
+  static void bits_to_indexes_avx2(int bit_to_search, const int num_bits,
+                                   const uint8_t* bits, int& num_indexes,
+                                   uint16_t* indexes);
+  static void bits_filter_indexes_avx2(int bit_to_search, const int num_bits,
+                                       const uint8_t* bits, const uint16_t* input_indexes,
+                                       int& num_indexes, uint16_t* indexes);
   template <int bit_to_search>
-  static void bits_to_indexes_avx2(const int num_bits, const uint8_t* bits,
-                                   int& num_indexes, uint16_t* indexes);
+  static void bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
+                                       int& num_indexes, uint16_t* indexes);
   template <int bit_to_search>
-  static void bits_filter_indexes_avx2(const int num_bits, const uint8_t* bits,
-                                       const uint16_t* input_indexes, int& num_indexes,
-                                       uint16_t* indexes);
+  static void bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
+                                           const uint16_t* input_indexes,
+                                           int& num_indexes, uint16_t* indexes);
   static void bits_to_bytes_avx2(const int num_bits, const uint8_t* bits, uint8_t* bytes);
   static void bytes_to_bits_avx2(const int num_bits, const uint8_t* bytes, uint8_t* bits);
   static bool are_all_bytes_zero_avx2(const uint8_t* bytes, uint32_t num_bytes);

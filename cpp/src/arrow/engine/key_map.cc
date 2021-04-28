@@ -121,10 +121,6 @@ void SwissTable::lookup_1(const uint16_t* selection, const int num_keys,
     out_slot_ids[id] = static_cast<uint32_t>(islot);
   }
 }
-template void SwissTable::lookup_1<true>(const uint16_t*, const int, const uint32_t*,
-                                         uint8_t*, uint32_t*, uint32_t*);
-template void SwissTable::lookup_1<false>(const uint16_t*, const int, const uint32_t*,
-                                          uint8_t*, uint32_t*, uint32_t*);
 
 // Run a single round of slot search - comparison / insert - filter unprocessed.
 // Update selection vector to reflect which items have been processed.
@@ -235,8 +231,8 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
   // Append any unprocessed entries
   if (num_processed < inout_num_selected) {
     memmove(ids[category_nomatch] + num_ids[category_nomatch],
-           inout_selection + num_processed,
-           sizeof(uint16_t) * (inout_num_selected - num_processed));
+            inout_selection + num_processed,
+            sizeof(uint16_t) * (inout_num_selected - num_processed));
     num_ids[category_nomatch] += (inout_num_selected - num_processed);
   }
 

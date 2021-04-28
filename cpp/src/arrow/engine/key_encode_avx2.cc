@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/engine/key_encode.h"
-
 #include <immintrin.h>
+
+#include "arrow/engine/key_encode.h"
 
 namespace arrow {
 namespace compute {
@@ -49,6 +49,17 @@ inline __m256i inclusive_prefix_sum_32bit_avx2(__m256i x) {
   return x;
 }
 
+void KeyEncoder::EncoderBinary::EncodeHelper_avx2(bool is_row_fixed_length,
+                                                  uint32_t offset_within_row,
+                                                  KeyRowArray& rows,
+                                                  const KeyColumnArray& col) {
+  if (is_row_fixed_length) {
+    EncodeImp_avx2<true>(offset_within_row, rows, col);
+  } else {
+    EncodeImp_avx2<false>(offset_within_row, rows, col);
+  }
+}
+
 template <bool is_row_fixed_length>
 void KeyEncoder::EncoderBinary::EncodeImp_avx2(uint32_t offset_within_row,
                                                KeyRowArray& rows,
@@ -71,10 +82,18 @@ void KeyEncoder::EncoderBinary::EncodeImp_avx2(uint32_t offset_within_row,
         }
       });
 }
-template void KeyEncoder::EncoderBinary::EncodeImp_avx2<false>(uint32_t, KeyRowArray&,
-                                                               const KeyColumnArray&);
-template void KeyEncoder::EncoderBinary::EncodeImp_avx2<true>(uint32_t, KeyRowArray&,
-                                                              const KeyColumnArray&);
+
+void KeyEncoder::EncoderBinary::DecodeHelper_avx2(bool is_row_fixed_length,
+                                                  uint32_t start_row, uint32_t num_rows,
+                                                  uint32_t offset_within_row,
+                                                  const KeyRowArray& rows,
+                                                  KeyColumnArray& col) {
+  if (is_row_fixed_length) {
+    DecodeImp_avx2<true>(start_row, num_rows, offset_within_row, rows, col);
+  } else {
+    DecodeImp_avx2<false>(start_row, num_rows, offset_within_row, rows, col);
+  }
+}
 
 template <bool is_row_fixed_length>
 void KeyEncoder::EncoderBinary::DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
@@ -91,14 +110,20 @@ void KeyEncoder::EncoderBinary::DecodeImp_avx2(uint32_t start_row, uint32_t num_
         }
       });
 }
-template void KeyEncoder::EncoderBinary::DecodeImp_avx2<false>(uint32_t, uint32_t,
-                                                               uint32_t,
-                                                               const KeyRowArray&,
-                                                               KeyColumnArray&);
-template void KeyEncoder::EncoderBinary::DecodeImp_avx2<true>(uint32_t, uint32_t,
-                                                              uint32_t,
-                                                              const KeyRowArray&,
-                                                              KeyColumnArray&);
+
+uint32_t KeyEncoder::EncoderBinaryPair::EncodeHelper_avx2(
+    bool is_row_fixed_length, uint32_t col_width, uint32_t offset_within_row,
+    KeyRowArray& rows, const KeyColumnArray& col1, const KeyColumnArray& col2) {
+  typedef uint32_t (*EncodeImp_avx2_t)(uint32_t, KeyRowArray&, const KeyColumnArray&,
+                                       const KeyColumnArray&);
+  static const EncodeImp_avx2_t EncodeImp_avx2_fn[] = {
+      EncodeImp_avx2<false, 1>, EncodeImp_avx2<false, 2>, EncodeImp_avx2<false, 4>,
+      EncodeImp_avx2<false, 8>, EncodeImp_avx2<true, 1>,  EncodeImp_avx2<true, 2>,
+      EncodeImp_avx2<true, 4>,  EncodeImp_avx2<true, 8>};
+  int log_col_width = col_width == 8 ? 3 : col_width == 4 ? 2 : col_width == 2 ? 1 : 0;
+  int dispatch_const = (is_row_fixed_length ? 4 : 0) + log_col_width;
+  return EncodeImp_avx2_fn[dispatch_const](offset_within_row, rows, col1, col2);
+}
 
 template <bool is_row_fixed_length, uint32_t col_width>
 uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_row,
@@ -206,22 +231,22 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
 
   return num_processed;
 }
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<false, 1>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<true, 1>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<false, 2>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<true, 2>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<false, 4>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<true, 4>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<false, 8>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2<true, 8>(
-    uint32_t, KeyRowArray&, const KeyColumnArray&, const KeyColumnArray&);
+
+uint32_t KeyEncoder::EncoderBinaryPair::DecodeHelper_avx2(
+    bool is_row_fixed_length, uint32_t col_width, uint32_t start_row, uint32_t num_rows,
+    uint32_t offset_within_row, const KeyRowArray& rows, KeyColumnArray& col1,
+    KeyColumnArray& col2) {
+  typedef uint32_t (*DecodeImp_avx2_t)(uint32_t, uint32_t, uint32_t, const KeyRowArray&,
+                                       KeyColumnArray&, KeyColumnArray&);
+  static const DecodeImp_avx2_t DecodeImp_avx2_fn[] = {
+      DecodeImp_avx2<false, 1>, DecodeImp_avx2<false, 2>, DecodeImp_avx2<false, 4>,
+      DecodeImp_avx2<false, 8>, DecodeImp_avx2<true, 1>,  DecodeImp_avx2<true, 2>,
+      DecodeImp_avx2<true, 4>,  DecodeImp_avx2<true, 8>};
+  int log_col_width = col_width == 8 ? 3 : col_width == 4 ? 2 : col_width == 2 ? 1 : 0;
+  int dispatch_const = log_col_width | (is_row_fixed_length ? 4 : 0);
+  return DecodeImp_avx2_fn[dispatch_const](start_row, num_processed, offset_within_row,
+                                           rows, col1, col2);
+}
 
 template <bool is_row_fixed_length, uint32_t col_width>
 uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
@@ -347,22 +372,6 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
 
   return num_processed;
 }
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<false, 1>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<false, 2>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<false, 4>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<false, 8>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<true, 1>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<true, 2>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<true, 4>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
-template uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2<true, 8>(
-    uint32_t, uint32_t, uint32_t, const KeyRowArray&, KeyColumnArray&, KeyColumnArray&);
 
 uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
     KeyRowArray& rows, const std::vector<KeyColumnArray>& varbinary_cols,
@@ -479,6 +488,16 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
   return num_processed;
 }
 
+void KeyEncoder::EncoderVarBinary::EncodeHelper_avx2(uint32_t varbinary_col_id,
+                                                     KeyRowArray& rows,
+                                                     const KeyColumnArray& col) {
+  if (varbinary_col_id == 0) {
+    EncodeImp_avx2<true>(varbinary_col_id, rows, col);
+  } else {
+    EncodeImp_avx2<false>(varbinary_col_id, rows, col);
+  }
+}
+
 template <bool first_varbinary_col>
 void KeyEncoder::EncoderVarBinary::EncodeImp_avx2(uint32_t varbinary_col_id,
                                                   KeyRowArray& rows,
@@ -501,10 +520,18 @@ void KeyEncoder::EncoderVarBinary::EncodeImp_avx2(uint32_t varbinary_col_id,
         }
       });
 }
-template void KeyEncoder::EncoderVarBinary::EncodeImp_avx2<false>(uint32_t, KeyRowArray&,
-                                                                  const KeyColumnArray&);
-template void KeyEncoder::EncoderVarBinary::EncodeImp_avx2<true>(uint32_t, KeyRowArray&,
-                                                                 const KeyColumnArray&);
+
+void KeyEncoder::EncoderVarBinary::DecodeHelper_avx2(uint32_t start_row,
+                                                     uint32_t num_rows,
+                                                     uint32_t varbinary_col_id,
+                                                     const KeyRowArray& rows,
+                                                     KeyColumnArray& col) {
+  if (varbinary_col_id == 0) {
+    DecodeImp_avx2<true>(start_row, num_rows, varbinary_col_id, rows, col);
+  } else {
+    DecodeImp_avx2<false>(start_row, num_rows, varbinary_col_id, rows, col);
+  }
+}
 
 template <bool first_varbinary_col>
 void KeyEncoder::EncoderVarBinary::DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
@@ -521,14 +548,6 @@ void KeyEncoder::EncoderVarBinary::DecodeImp_avx2(uint32_t start_row, uint32_t n
         }
       });
 }
-template void KeyEncoder::EncoderVarBinary::DecodeImp_avx2<false>(uint32_t, uint32_t,
-                                                                  uint32_t,
-                                                                  const KeyRowArray&,
-                                                                  KeyColumnArray&);
-template void KeyEncoder::EncoderVarBinary::DecodeImp_avx2<true>(uint32_t, uint32_t,
-                                                                 uint32_t,
-                                                                 const KeyRowArray&,
-                                                                 KeyColumnArray&);
 
 #endif
 

@@ -207,7 +207,7 @@ inline void split_bytes_avx2(__m256i word0, __m256i word1, __m256i word2, __m256
   byte7 = _mm256_permute4x64_epi64(byte67, 0xee);  // 11101110 b
 }
 
-// TODO: This one can only process a multiple of 32 values.
+// This one can only process a multiple of 32 values.
 // The caller needs to process the remaining tail, if the input is not divisible by 32,
 // using a different method.
 // TODO: Explain the idea behind storing arrays in SIMD registers.

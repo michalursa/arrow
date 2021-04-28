@@ -15,10 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/engine/key_compare.h"
-
 #include <immintrin.h>
 
+#include "arrow/engine/key_compare.h"
 #include "arrow/util/bit_util.h"
 
 namespace arrow {

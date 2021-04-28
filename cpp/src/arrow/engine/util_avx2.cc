@@ -25,9 +25,20 @@ namespace util {
 
 #if defined(ARROW_HAVE_AVX2)
 
+void BitUtil::bits_to_indexes_avx2(int bit_to_search, const int num_bits,
+                                   const uint8_t* bits, int& num_indexes,
+                                   uint16_t* indexes) {
+  if (bit_to_search == 0) {
+    bits_to_indexes_imp_avx2<0>(num_bits, bits, num_indexes, indexes);
+  } else {
+    ARROW_DCHECK(bit_to_search == 1);
+    bits_to_indexes_imp_avx2<1>(num_bits, bits, num_indexes, indexes);
+  }
+}
+
 template <int bit_to_search>
-void BitUtil::bits_to_indexes_avx2(const int num_bits, const uint8_t* bits,
-                                   int& num_indexes, uint16_t* indexes) {
+void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
+                                       int& num_indexes, uint16_t* indexes) {
   // 64 bits at a time
   constexpr int unroll = 64;
 
@@ -65,15 +76,21 @@ void BitUtil::bits_to_indexes_avx2(const int num_bits, const uint8_t* bits,
     num_indexes += num_indexes_loop;
   }
 }
-template void BitUtil::bits_to_indexes_avx2<0>(const int num_bits, const uint8_t* bits,
-                                               int& num_indexes, uint16_t* indexes);
-template void BitUtil::bits_to_indexes_avx2<1>(const int num_bits, const uint8_t* bits,
-                                               int& num_indexes, uint16_t* indexes);
+
+void BitUtil::bits_filter_indexes_avx2(int bit_to_search, const int num_bits,
+                                       const uint8_t* bits, const uint16_t* input_indexes,
+                                       int& num_indexes, uint16_t* indexes) {
+  if (bit_to_search == 0) {
+    bits_filter_indexes_imp_avx2<0>(num_bits, bits, input_indexes, num_indexes, indexes);
+  } else {
+    bits_filter_indexes_imp_avx2<1>(num_bits, bits, input_indexes, num_indexes, indexes);
+  }
+}
 
 template <int bit_to_search>
-void BitUtil::bits_filter_indexes_avx2(const int num_bits, const uint8_t* bits,
-                                       const uint16_t* input_indexes, int& num_indexes,
-                                       uint16_t* indexes) {
+void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
+                                           const uint16_t* input_indexes,
+                                           int& num_indexes, uint16_t* indexes) {
   // 64 bits at a time
   constexpr int unroll = 64;
 
@@ -127,14 +144,6 @@ void BitUtil::bits_filter_indexes_avx2(const int num_bits, const uint8_t* bits,
     }
   }
 }
-template void BitUtil::bits_filter_indexes_avx2<0>(const int num_bits,
-                                                   const uint8_t* bits,
-                                                   const uint16_t* input_indexes,
-                                                   int& num_indexes, uint16_t* indexes);
-template void BitUtil::bits_filter_indexes_avx2<1>(const int num_bits,
-                                                   const uint8_t* bits,
-                                                   const uint16_t* input_indexes,
-                                                   int& num_indexes, uint16_t* indexes);
 
 void BitUtil::bits_to_bytes_avx2(const int num_bits, const uint8_t* bits,
                                  uint8_t* bytes) {
