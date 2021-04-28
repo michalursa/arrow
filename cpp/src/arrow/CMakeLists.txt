@@ -119,6 +119,26 @@ function(ADD_ARROW_BENCHMARK REL_TEST_NAME)
                 ${ARG_UNPARSED_ARGUMENTS})
 endfunction()
 
+macro(append_avx2_src SRC)
+  if(ARROW_HAVE_RUNTIME_AVX2)
+    list(APPEND ARROW_SRCS ${SRC})
+    set_source_files_properties(${SRC} PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(${SRC} PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
+  endif()
+endmacro()
+
+macro(append_avx512_src SRC)
+  if(ARROW_HAVE_RUNTIME_AVX512)
+    list(APPEND ARROW_SRCS ${SRC})
+    set_source_files_properties(${SRC} PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(${SRC} PROPERTIES
+                                COMPILE_FLAGS ${ARROW_AVX512_FLAG})
+  endif()
+endmacro()
+
 set(ARROW_SRCS
     array/array_base.cc
     array/array_binary.cc
@@ -214,20 +234,8 @@ set(ARROW_SRCS
     vendored/double-conversion/fixed-dtoa.cc
     vendored/double-conversion/diy-fp.cc
     vendored/double-conversion/strtod.cc)
-
-if(ARROW_HAVE_RUNTIME_AVX2)
-  list(APPEND ARROW_SRCS util/bpacking_avx2.cc)
-  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES COMPILE_FLAGS
-                              ${ARROW_AVX2_FLAG})
-endif()
-if(ARROW_HAVE_RUNTIME_AVX512)
-  list(APPEND ARROW_SRCS util/bpacking_avx512.cc)
-  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES SKIP_PRECOMPILE_HEADERS
-                              ON)
-  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES COMPILE_FLAGS
-                              ${ARROW_AVX512_FLAG})
-endif()
+  append_avx2_src(util/bpacking_avx2.cc)
+  append_avx512_src(util/bpacking_avx512.cc)
 
 if(APPLE)
   list(APPEND ARROW_SRCS vendored/datetime/ios.mm)
@@ -399,46 +407,13 @@ if(ARROW_COMPUTE)
               engine/key_encode.cc              
               engine/groupby.cc
               engine/util.cc)
-
-  if(ARROW_HAVE_RUNTIME_AVX2)
-    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx2.cc)
-    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-    list(APPEND ARROW_SRCS engine/key_hash_avx2.cc)
-    set_source_files_properties(engine/key_hash_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(engine/key_hash_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-    list(APPEND ARROW_SRCS engine/key_map_avx2.cc)
-    set_source_files_properties(engine/key_map_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(engine/key_map_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-    list(APPEND ARROW_SRCS engine/key_compare_avx2.cc)
-    set_source_files_properties(engine/key_compare_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(engine/key_compare_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-    list(APPEND ARROW_SRCS engine/key_encode_avx2.cc)
-    set_source_files_properties(engine/key_encode_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(engine/key_encode_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-    list(APPEND ARROW_SRCS engine/util_avx2.cc)
-    set_source_files_properties(engine/util_avx2.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(engine/util_avx2.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX2_FLAG})
-  endif()
-  if(ARROW_HAVE_RUNTIME_AVX512)
-    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx512.cc)
-    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
-                                SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
-                                COMPILE_FLAGS ${ARROW_AVX512_FLAG})
-  endif()
+  append_avx2_src(compute/kernels/aggregate_basic_avx2.cc)
+  append_avx2_src(engine/key_hash_avx2.cc)
+  append_avx2_src(engine/key_map_avx2.cc)
+  append_avx2_src(engine/key_compare_avx2.cc)
+  append_avx2_src(engine/key_encode_avx2.cc)
+  append_avx2_src(engine/util_avx2.cc)
+  append_avx512_src(compute/kernels/aggregate_basic_avx512.cc)
 endif()
 
 if(ARROW_FILESYSTEM)
