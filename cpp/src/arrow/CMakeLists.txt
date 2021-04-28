@@ -404,8 +404,7 @@ if(ARROW_COMPUTE)
               engine/key_hash.cc
               engine/key_map.cc
               engine/key_compare.cc
-              engine/key_encode.cc              
-              engine/groupby.cc
+              engine/key_encode.cc
               engine/util.cc)
   append_avx2_src(compute/kernels/aggregate_basic_avx2.cc)
   append_avx2_src(engine/key_hash_avx2.cc)
