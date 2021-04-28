@@ -494,7 +494,7 @@ struct GrouperFastImpl : Grouper {
                           uint16_t* out_selection_mismatch) {
       arrow::compute::KeyCompare::CompareRows(
           num_keys_to_compare, selection_may_be_null, group_ids, &impl_ptr->encode_ctx_,
-          *out_num_keys_mismatch, out_selection_mismatch, impl_ptr->rows_minibatch_,
+          out_num_keys_mismatch, out_selection_mismatch, impl_ptr->rows_minibatch_,
           impl_ptr->rows_);
     };
     auto append_func = [impl_ptr](int num_keys, const uint16_t* selection) {
@@ -546,8 +546,8 @@ struct GrouperFastImpl : Grouper {
       // Encode
       rows_minibatch_.Clean();
       RETURN_NOT_OK(encoder_.PrepareOutputForEncode(start_row, batch_size_next,
-                                                    rows_minibatch_, cols_));
-      encoder_.Encode(start_row, batch_size_next, rows_minibatch_, cols_);
+                                                    &rows_minibatch_, cols_));
+      encoder_.Encode(start_row, batch_size_next, &rows_minibatch_, cols_);
 
       // Compute hash
       if (encoder_.get_row_metadata().is_fixed_length) {
@@ -622,7 +622,7 @@ struct GrouperFastImpl : Grouper {
       int64_t batch_size_next =
           std::min(num_groups - start_row, static_cast<int64_t>(minibatch_size_max_));
       encoder_.DecodeFixedLengthBuffers(start_row, start_row, batch_size_next, rows_,
-                                        cols_);
+                                        &cols_);
       start_row += batch_size_next;
     }
 
@@ -644,7 +644,7 @@ struct GrouperFastImpl : Grouper {
         int64_t batch_size_next =
             std::min(num_groups - start_row, static_cast<int64_t>(minibatch_size_max_));
         encoder_.DecodeVaryingLengthBuffers(start_row, start_row, batch_size_next, rows_,
-                                            cols_);
+                                            &cols_);
         start_row += batch_size_next;
       }
     }

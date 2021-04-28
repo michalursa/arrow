@@ -199,14 +199,14 @@ class KeyEncoder {
   /// Use that information to resize provided row array so that it can fit
   /// encoded data.
   Status PrepareOutputForEncode(int64_t start_input_row, int64_t num_input_rows,
-                                KeyRowArray& rows,
+                                KeyRowArray* rows,
                                 const std::vector<KeyColumnArray>& all_cols);
 
   /// Encode a window of column oriented data into the entire output
   /// row oriented storage.
   /// The output buffers for encoding need to be correctly sized before
   /// starting encoding.
-  void Encode(int64_t start_input_row, int64_t num_input_rows, KeyRowArray& rows,
+  void Encode(int64_t start_input_row, int64_t num_input_rows, KeyRowArray* rows,
               const std::vector<KeyColumnArray>& cols);
 
   /// Decode a window of row oriented data into a corresponding
@@ -219,11 +219,11 @@ class KeyEncoder {
   /// length buffers sizes.
   void DecodeFixedLengthBuffers(int64_t start_row_input, int64_t start_row_output,
                                 int64_t num_rows, const KeyRowArray& rows,
-                                std::vector<KeyColumnArray>& cols);
+                                std::vector<KeyColumnArray>* cols);
 
   void DecodeVaryingLengthBuffers(int64_t start_row_input, int64_t start_row_output,
                                   int64_t num_rows, const KeyRowArray& rows,
-                                  std::vector<KeyColumnArray>& cols);
+                                  std::vector<KeyColumnArray>* cols);
 
  private:
   void PrepareMetadata(const std::vector<KeyColumnMetadata>& col_metadata,
@@ -252,26 +252,26 @@ class KeyEncoder {
    public:
     static KeyColumnArray ArrayReplace(const KeyColumnArray& column,
                                        const KeyColumnArray& temp);
-    static void PreEncode(const KeyColumnArray& input, KeyColumnArray& output,
+    static void PreEncode(const KeyColumnArray& input, KeyColumnArray* output,
                           KeyEncoderContext* ctx);
-    static void PostDecode(const KeyColumnArray& input, KeyColumnArray& output,
+    static void PostDecode(const KeyColumnArray& input, KeyColumnArray* output,
                            KeyEncoderContext* ctx);
   };
 
   class EncoderInteger {
    public:
-    static void Encode(uint32_t* offset_within_row, KeyRowArray& rows,
+    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx,
-                       KeyColumnArray& temp);
+                       KeyColumnArray* temp);
     static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
-                       const KeyRowArray& rows, KeyColumnArray& col,
-                       KeyEncoderContext* ctx, KeyColumnArray& temp);
+                       const KeyRowArray& rows, KeyColumnArray* col,
+                       KeyEncoderContext* ctx, KeyColumnArray* temp);
     static bool UsesTransform(const KeyColumnArray& column);
     static KeyColumnArray ArrayReplace(const KeyColumnArray& column,
-                                       KeyColumnArray& temp);
-    static void PreEncode(const KeyColumnArray& input, KeyColumnArray& output,
+                                       const KeyColumnArray& temp);
+    static void PreEncode(const KeyColumnArray& input, KeyColumnArray* output,
                           KeyEncoderContext* ctx);
-    static void PostDecode(const KeyColumnArray& input, KeyColumnArray& output,
+    static void PostDecode(const KeyColumnArray& input, KeyColumnArray* output,
                            KeyEncoderContext* ctx);
 
    private:
@@ -280,12 +280,12 @@ class KeyEncoder {
 
   class EncoderBinary {
    public:
-    static void Encode(uint32_t* offset_within_row, KeyRowArray& rows,
+    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx,
-                       KeyColumnArray& temp);
+                       KeyColumnArray* temp);
     static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
-                       const KeyRowArray& rows, KeyColumnArray& col,
-                       KeyEncoderContext* ctx, KeyColumnArray& temp);
+                       const KeyRowArray& rows, KeyColumnArray* col,
+                       KeyEncoderContext* ctx, KeyColumnArray* temp);
     static bool IsInteger(const KeyColumnMetadata& metadata);
 
    private:
@@ -298,33 +298,33 @@ class KeyEncoder {
                                           KeyColumnArray* col_mutable_maybe_null,
                                           COPY_FN copy_fn);
     template <bool is_row_fixed_length>
-    static void EncodeImp(uint32_t offset_within_row, KeyRowArray& rows,
+    static void EncodeImp(uint32_t offset_within_row, KeyRowArray* rows,
                           const KeyColumnArray& col);
     template <bool is_row_fixed_length>
     static void DecodeImp(uint32_t start_row, uint32_t num_rows,
                           uint32_t offset_within_row, const KeyRowArray& rows,
-                          KeyColumnArray& col);
+                          KeyColumnArray* col);
 #if defined(ARROW_HAVE_AVX2)
     static void EncodeHelper_avx2(bool is_row_fixed_length, uint32_t offset_within_row,
-                                  KeyRowArray& rows, const KeyColumnArray& col);
+                                  KeyRowArray* rows, const KeyColumnArray& col);
     static void DecodeHelper_avx2(bool is_row_fixed_length, uint32_t start_row,
                                   uint32_t num_rows, uint32_t offset_within_row,
-                                  const KeyRowArray& rows, KeyColumnArray& col);
+                                  const KeyRowArray& rows, KeyColumnArray* col);
     template <bool is_row_fixed_length>
-    static void EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray& rows,
+    static void EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray* rows,
                                const KeyColumnArray& col);
     template <bool is_row_fixed_length>
     static void DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
                                uint32_t offset_within_row, const KeyRowArray& rows,
-                               KeyColumnArray& col);
+                               KeyColumnArray* col);
 #endif
-    static void ColumnMemsetNulls(uint32_t offset_within_row, KeyRowArray& rows,
+    static void ColumnMemsetNulls(uint32_t offset_within_row, KeyRowArray* rows,
                                   const KeyColumnArray& col, KeyEncoderContext* ctx,
-                                  KeyColumnArray& temp_vector_16bit, uint8_t byte_value);
+                                  KeyColumnArray* temp_vector_16bit, uint8_t byte_value);
     template <bool is_row_fixed_length, uint32_t col_width>
-    static void ColumnMemsetNullsImp(uint32_t offset_within_row, KeyRowArray& rows,
+    static void ColumnMemsetNullsImp(uint32_t offset_within_row, KeyRowArray* rows,
                                      const KeyColumnArray& col, KeyEncoderContext* ctx,
-                                     KeyColumnArray& temp_vector_16bit,
+                                     KeyColumnArray* temp_vector_16bit,
                                      uint8_t byte_value);
   };
 
@@ -334,42 +334,42 @@ class KeyEncoder {
                                const KeyColumnMetadata& col2) {
       return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2);
     }
-    static void Encode(uint32_t* offset_within_row, KeyRowArray& rows,
+    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col1, const KeyColumnArray& col2,
-                       KeyEncoderContext* ctx, KeyColumnArray& temp1,
-                       KeyColumnArray& temp2);
+                       KeyEncoderContext* ctx, KeyColumnArray* temp1,
+                       KeyColumnArray* temp2);
     static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
-                       const KeyRowArray& rows, KeyColumnArray& col1,
-                       KeyColumnArray& col2, KeyEncoderContext* ctx,
-                       KeyColumnArray& temp1, KeyColumnArray& temp2);
+                       const KeyRowArray& rows, KeyColumnArray* col1,
+                       KeyColumnArray* col2, KeyEncoderContext* ctx,
+                       KeyColumnArray* temp1, KeyColumnArray* temp2);
 
    private:
     template <bool is_row_fixed_length, typename col1_type, typename col2_type>
     static void EncodeImp(uint32_t num_rows_to_skip, uint32_t offset_within_row,
-                          KeyRowArray& rows, const KeyColumnArray& col1,
+                          KeyRowArray* rows, const KeyColumnArray& col1,
                           const KeyColumnArray& col2);
     template <bool is_row_fixed_length, typename col1_type, typename col2_type>
     static void DecodeImp(uint32_t num_rows_to_skip, uint32_t start_row,
                           uint32_t num_rows, uint32_t offset_within_row,
-                          const KeyRowArray& rows, KeyColumnArray& col1,
-                          KeyColumnArray& col2);
+                          const KeyRowArray& rows, KeyColumnArray* col1,
+                          KeyColumnArray* col2);
 #if defined(ARROW_HAVE_AVX2)
     static uint32_t EncodeHelper_avx2(bool is_row_fixed_length, uint32_t col_width,
-                                      uint32_t offset_within_row, KeyRowArray& rows,
+                                      uint32_t offset_within_row, KeyRowArray* rows,
                                       const KeyColumnArray& col1,
                                       const KeyColumnArray& col2);
     static uint32_t DecodeHelper_avx2(bool is_row_fixed_length, uint32_t col_width,
                                       uint32_t start_row, uint32_t num_rows,
                                       uint32_t offset_within_row, const KeyRowArray& rows,
-                                      KeyColumnArray& col1, KeyColumnArray& col2);
+                                      KeyColumnArray* col1, KeyColumnArray* col2);
     template <bool is_row_fixed_length, uint32_t col_width>
-    static uint32_t EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray& rows,
+    static uint32_t EncodeImp_avx2(uint32_t offset_within_row, KeyRowArray* rows,
                                    const KeyColumnArray& col1,
                                    const KeyColumnArray& col2);
     template <bool is_row_fixed_length, uint32_t col_width>
     static uint32_t DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
                                    uint32_t offset_within_row, const KeyRowArray& rows,
-                                   KeyColumnArray& col1, KeyColumnArray& col2);
+                                   KeyColumnArray* col1, KeyColumnArray* col2);
 #endif
   };
 
@@ -380,30 +380,30 @@ class KeyEncoder {
     // a) row offsets for varying-length rows
     // b) within each new row, the cumulative length array
     // of varying-length values within a row.
-    static void Encode(KeyRowArray& rows,
+    static void Encode(KeyRowArray* rows,
                        const std::vector<KeyColumnArray>& varbinary_cols,
                        KeyEncoderContext* ctx);
     static void Decode(uint32_t start_row, uint32_t num_rows, const KeyRowArray& rows,
-                       std::vector<KeyColumnArray>& varbinary_cols,
-                       std::vector<uint32_t>& varbinary_cols_base_offset,
+                       std::vector<KeyColumnArray>* varbinary_cols,
+                       const std::vector<uint32_t>& varbinary_cols_base_offset,
                        KeyEncoderContext* ctx);
 
    private:
-    static void EncodeImp(uint32_t num_rows_already_processed, KeyRowArray& rows,
+    static void EncodeImp(uint32_t num_rows_already_processed, KeyRowArray* rows,
                           const std::vector<KeyColumnArray>& varbinary_cols);
 #if defined(ARROW_HAVE_AVX2)
-    static uint32_t EncodeImp_avx2(KeyRowArray& rows,
+    static uint32_t EncodeImp_avx2(KeyRowArray* rows,
                                    const std::vector<KeyColumnArray>& varbinary_cols,
-                                   KeyColumnArray& temp_buffer_32B_per_col);
+                                   KeyColumnArray* temp_buffer_32B_per_col);
 #endif
   };
 
   class EncoderVarBinary {
    public:
-    static void Encode(uint32_t varbinary_col_id, KeyRowArray& rows,
+    static void Encode(uint32_t varbinary_col_id, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx);
     static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t varbinary_col_id,
-                       const KeyRowArray& rows, KeyColumnArray& col,
+                       const KeyRowArray& rows, KeyColumnArray* col,
                        KeyEncoderContext* ctx);
 
    private:
@@ -416,34 +416,34 @@ class KeyEncoder {
                                           KeyColumnArray* col_mutable_maybe_null,
                                           COPY_FN copy_fn);
     template <bool first_varbinary_col>
-    static void EncodeImp(uint32_t varbinary_col_id, KeyRowArray& rows,
+    static void EncodeImp(uint32_t varbinary_col_id, KeyRowArray* rows,
                           const KeyColumnArray& col);
     template <bool first_varbinary_col>
     static void DecodeImp(uint32_t start_row, uint32_t num_rows,
                           uint32_t varbinary_col_id, const KeyRowArray& rows,
-                          KeyColumnArray& col);
+                          KeyColumnArray* col);
 #if defined(ARROW_HAVE_AVX2)
-    static void EncodeHelper_avx2(uint32_t varbinary_col_id, KeyRowArray& rows,
+    static void EncodeHelper_avx2(uint32_t varbinary_col_id, KeyRowArray* rows,
                                   const KeyColumnArray& col);
     static void DecodeHelper_avx2(uint32_t start_row, uint32_t num_rows,
                                   uint32_t varbinary_col_id, const KeyRowArray& rows,
-                                  KeyColumnArray& col);
+                                  KeyColumnArray* col);
     template <bool first_varbinary_col>
-    static void EncodeImp_avx2(uint32_t varbinary_col_id, KeyRowArray& rows,
+    static void EncodeImp_avx2(uint32_t varbinary_col_id, KeyRowArray* rows,
                                const KeyColumnArray& col);
     template <bool first_varbinary_col>
     static void DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
                                uint32_t varbinary_col_id, const KeyRowArray& rows,
-                               KeyColumnArray& col);
+                               KeyColumnArray* col);
 #endif
   };
 
   class EncoderNulls {
    public:
-    static void Encode(KeyRowArray& rows, const std::vector<KeyColumnArray>& cols,
-                       KeyEncoderContext* ctx, KeyColumnArray& temp_vector_16bit);
+    static void Encode(KeyRowArray* rows, const std::vector<KeyColumnArray>& cols,
+                       KeyEncoderContext* ctx, KeyColumnArray* temp_vector_16bit);
     static void Decode(uint32_t start_row, uint32_t num_rows, const KeyRowArray& rows,
-                       std::vector<KeyColumnArray>& cols);
+                       std::vector<KeyColumnArray>* cols);
   };
 
   KeyEncoderContext* ctx_;

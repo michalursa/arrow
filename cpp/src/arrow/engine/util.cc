@@ -27,26 +27,30 @@ using BitUtil::CountTrailingZeros;
 namespace util {
 
 inline void BitUtil::bits_to_indexes_helper(uint64_t word, uint16_t base_index,
-                                            int& num_indexes, uint16_t* indexes) {
+                                            int* num_indexes, uint16_t* indexes) {
+  int n = *num_indexes;
   while (word) {
-    indexes[num_indexes++] = base_index + static_cast<uint16_t>(CountTrailingZeros(word));
+    indexes[n++] = base_index + static_cast<uint16_t>(CountTrailingZeros(word));
     word &= word - 1;
   }
+  *num_indexes = n;
 }
 
 inline void BitUtil::bits_filter_indexes_helper(uint64_t word,
                                                 const uint16_t* input_indexes,
-                                                int& num_indexes, uint16_t* indexes) {
+                                                int* num_indexes, uint16_t* indexes) {
+  int n = *num_indexes;
   while (word) {
-    indexes[num_indexes++] = input_indexes[CountTrailingZeros(word)];
+    indexes[n++] = input_indexes[CountTrailingZeros(word)];
     word &= word - 1;
   }
+  *num_indexes = n;
 }
 
 template <int bit_to_search, bool filter_input_indexes>
 void BitUtil::bits_to_indexes_internal(CPUInstructionSet instruction_set,
                                        const int num_bits, const uint8_t* bits,
-                                       const uint16_t* input_indexes, int& num_indexes,
+                                       const uint16_t* input_indexes, int* num_indexes,
                                        uint16_t* indexes) {
   // 64 bits at a time
   constexpr int unroll = 64;
@@ -61,7 +65,7 @@ void BitUtil::bits_to_indexes_internal(CPUInstructionSet instruction_set,
     }
   } else {
 #endif
-    num_indexes = 0;
+    *num_indexes = 0;
     for (int i = 0; i < num_bits / unroll; ++i) {
       uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
       if (bit_to_search == 0) {
@@ -93,7 +97,7 @@ void BitUtil::bits_to_indexes_internal(CPUInstructionSet instruction_set,
 }
 
 void BitUtil::bits_to_indexes(int bit_to_search, CPUInstructionSet instruction_set,
-                              const int num_bits, const uint8_t* bits, int& num_indexes,
+                              const int num_bits, const uint8_t* bits, int* num_indexes,
                               uint16_t* indexes) {
   if (bit_to_search == 0) {
     bits_to_indexes_internal<0, false>(instruction_set, num_bits, bits, nullptr,
@@ -107,7 +111,7 @@ void BitUtil::bits_to_indexes(int bit_to_search, CPUInstructionSet instruction_s
 
 void BitUtil::bits_filter_indexes(int bit_to_search, CPUInstructionSet instruction_set,
                                   const int num_bits, const uint8_t* bits,
-                                  const uint16_t* input_indexes, int& num_indexes,
+                                  const uint16_t* input_indexes, int* num_indexes,
                                   uint16_t* indexes) {
   if (bit_to_search == 0) {
     bits_to_indexes_internal<0, true>(instruction_set, num_bits, bits, input_indexes,
@@ -120,11 +124,11 @@ void BitUtil::bits_filter_indexes(int bit_to_search, CPUInstructionSet instructi
 }
 
 void BitUtil::bits_split_indexes(CPUInstructionSet instruction_set, const int num_bits,
-                                 const uint8_t* bits, int& num_indexes_bit0,
+                                 const uint8_t* bits, int* num_indexes_bit0,
                                  uint16_t* indexes_bit0, uint16_t* indexes_bit1) {
   bits_to_indexes(0, instruction_set, num_bits, bits, num_indexes_bit0, indexes_bit0);
   int num_indexes_bit1;
-  bits_to_indexes(1, instruction_set, num_bits, bits, num_indexes_bit1, indexes_bit1);
+  bits_to_indexes(1, instruction_set, num_bits, bits, &num_indexes_bit1, indexes_bit1);
 }
 
 void BitUtil::bits_to_bytes_internal(const int num_bits, const uint8_t* bits,

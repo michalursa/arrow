@@ -26,7 +26,7 @@ namespace util {
 #if defined(ARROW_HAVE_AVX2)
 
 void BitUtil::bits_to_indexes_avx2(int bit_to_search, const int num_bits,
-                                   const uint8_t* bits, int& num_indexes,
+                                   const uint8_t* bits, int* num_indexes,
                                    uint16_t* indexes) {
   if (bit_to_search == 0) {
     bits_to_indexes_imp_avx2<0>(num_bits, bits, num_indexes, indexes);
@@ -38,7 +38,7 @@ void BitUtil::bits_to_indexes_avx2(int bit_to_search, const int num_bits,
 
 template <int bit_to_search>
 void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
-                                       int& num_indexes, uint16_t* indexes) {
+                                       int* num_indexes, uint16_t* indexes) {
   // 64 bits at a time
   constexpr int unroll = 64;
 
@@ -49,7 +49,7 @@ void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
   uint8_t byte_indexes[64];
   const uint64_t incr = 0x0808080808080808ULL;
   const uint64_t mask = 0x0706050403020100ULL;
-  num_indexes = 0;
+  *num_indexes = 0;
   for (int i = 0; i < num_bits / unroll; ++i) {
     uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
     if (bit_to_search == 0) {
@@ -73,13 +73,13 @@ void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
       output = _mm256_add_epi16(output, _mm256_set1_epi16(i * 64));
       _mm256_storeu_si256(((__m256i*)(indexes + num_indexes)) + j, output);
     }
-    num_indexes += num_indexes_loop;
+    *num_indexes += num_indexes_loop;
   }
 }
 
 void BitUtil::bits_filter_indexes_avx2(int bit_to_search, const int num_bits,
                                        const uint8_t* bits, const uint16_t* input_indexes,
-                                       int& num_indexes, uint16_t* indexes) {
+                                       int* num_indexes, uint16_t* indexes) {
   if (bit_to_search == 0) {
     bits_filter_indexes_imp_avx2<0>(num_bits, bits, input_indexes, num_indexes, indexes);
   } else {
@@ -90,7 +90,7 @@ void BitUtil::bits_filter_indexes_avx2(int bit_to_search, const int num_bits,
 template <int bit_to_search>
 void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
                                            const uint16_t* input_indexes,
-                                           int& num_indexes, uint16_t* indexes) {
+                                           int* out_num_indexes, uint16_t* indexes) {
   // 64 bits at a time
   constexpr int unroll = 64;
 
@@ -99,7 +99,7 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
   ARROW_DCHECK(num_bits % unroll == 0);
 
   const uint64_t mask = 0xfedcba9876543210ULL;
-  num_indexes = 0;
+  int num_indexes = 0;
   for (int i = 0; i < num_bits / unroll; ++i) {
     uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
     if (bit_to_search == 0) {
@@ -143,6 +143,8 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
       ++loop_id;
     }
   }
+
+  *out_num_indexes = num_indexes;
 }
 
 void BitUtil::bits_to_bytes_avx2(const int num_bits, const uint8_t* bits,

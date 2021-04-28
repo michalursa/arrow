@@ -30,13 +30,13 @@ namespace compute {
 
 class KeyCompare {
  public:
-  // Change it to return a single 16-bit selection vector of rows that failed comparison.
+  // Returns a single 16-bit selection vector of rows that failed comparison.
   // If there is input selection on the left, the resulting selection is a filtered image
   // of input selection.
   static void CompareRows(uint32_t num_rows_to_compare,
                           const uint16_t* sel_left_maybe_null,
                           const uint32_t* left_to_right_map,
-                          KeyEncoder::KeyEncoderContext* ctx, uint32_t& out_num_rows,
+                          KeyEncoder::KeyEncoderContext* ctx, uint32_t* out_num_rows,
                           uint16_t* out_sel_left_maybe_same,
                           const KeyEncoder::KeyRowArray& rows_left,
                           const KeyEncoder::KeyRowArray& rows_right);

@@ -35,7 +35,7 @@
 namespace arrow {
 namespace compute {
 
-inline uint32_t Hashing::avalanche_helper(uint32_t& acc) {
+inline uint32_t Hashing::avalanche_helper(uint32_t acc) {
   acc ^= (acc >> 15);
   acc *= PRIME32_2;
   acc ^= (acc >> 13);

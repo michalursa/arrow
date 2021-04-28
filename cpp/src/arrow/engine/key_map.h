@@ -118,8 +118,8 @@ class SwissTable {
 #endif
 
   // Completing hash table lookup post first access
-  Status lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected,
-                  uint16_t* inout_selection, bool& out_need_resize,
+  Status lookup_2(const uint32_t* hashes, uint32_t* inout_num_selected,
+                  uint16_t* inout_selection, bool* out_need_resize,
                   uint32_t* out_group_ids, uint32_t* out_next_slot_ids);
 
   // Resize small hash tables when 50% full (up to 8KB).

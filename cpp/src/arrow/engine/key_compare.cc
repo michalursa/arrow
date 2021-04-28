@@ -28,7 +28,7 @@ namespace compute {
 void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
                              const uint16_t* sel_left_maybe_null,
                              const uint32_t* left_to_right_map,
-                             KeyEncoder::KeyEncoderContext* ctx, uint32_t& out_num_rows,
+                             KeyEncoder::KeyEncoderContext* ctx, uint32_t* out_num_rows,
                              uint16_t* out_sel_left_maybe_same,
                              const KeyEncoder::KeyRowArray& rows_left,
                              const KeyEncoder::KeyRowArray& rows_right) {
@@ -42,7 +42,7 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
                rows_right.get_metadata().null_masks_bytes_per_row);
 
   if (num_rows_to_compare == 0) {
-    out_num_rows = 0;
+    *out_num_rows = 0;
     return;
   }
 
@@ -84,13 +84,13 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
     int out_num_rows_int;
     util::BitUtil::bits_filter_indexes(0, ctx->instr, num_rows_to_compare,
                                        match_bitvector, sel_left_maybe_null,
-                                       out_num_rows_int, out_sel_left_maybe_same);
-    out_num_rows = out_num_rows_int;
+                                       &out_num_rows_int, out_sel_left_maybe_same);
+    *out_num_rows = out_num_rows_int;
   } else {
     int out_num_rows_int;
     util::BitUtil::bits_to_indexes(0, ctx->instr, num_rows_to_compare, match_bitvector,
-                                   out_num_rows_int, out_sel_left_maybe_same);
-    out_num_rows = out_num_rows_int;
+                                   &out_num_rows_int, out_sel_left_maybe_same);
+    *out_num_rows = out_num_rows_int;
   }
 }
 

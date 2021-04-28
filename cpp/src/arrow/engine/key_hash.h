@@ -47,7 +47,7 @@ class Hashing {
   static const uint32_t PRIME32_5 = 0x165667B1;  // 0b00010110010101100110011110110001
 
   // Avalanche
-  static inline uint32_t avalanche_helper(uint32_t& acc);
+  static inline uint32_t avalanche_helper(uint32_t acc);
 #if defined(ARROW_HAVE_AVX2)
   static void avalanche_avx2(uint32_t num_keys, uint32_t* hashes);
 #endif

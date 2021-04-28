@@ -126,8 +126,8 @@ void SwissTable::lookup_1(const uint16_t* selection, const int num_keys,
 // Update selection vector to reflect which items have been processed.
 // Ids in selection vector do not have to be sorted.
 //
-Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected,
-                            uint16_t* inout_selection, bool& out_need_resize,
+Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t* inout_num_selected,
+                            uint16_t* inout_selection, bool* out_need_resize,
                             uint32_t* out_group_ids, uint32_t* inout_next_slot_ids) {
   // How many groups we can keep in hash table without resizing.
   // When we reach this limit, we need to break processing of any further rows.
@@ -141,7 +141,7 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
   // Temporary arrays are of limited size.
   // The input needs to be split into smaller portions if it exceeds that limit.
   //
-  ARROW_DCHECK(inout_num_selected <= static_cast<uint32_t>(1 << log_minibatch_));
+  ARROW_DCHECK(*inout_num_selected <= static_cast<uint32_t>(1 << log_minibatch_));
 
   // We will split input row ids into three categories:
   // - needing to visit next block [0]
@@ -149,9 +149,9 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
   // - inserted [2]
   //
   auto ids_inserted_buf =
-      util::TempVectorHolder<uint16_t>(temp_stack_, inout_num_selected);
+      util::TempVectorHolder<uint16_t>(temp_stack_, *inout_num_selected);
   auto ids_for_comparison_buf =
-      util::TempVectorHolder<uint16_t>(temp_stack_, inout_num_selected);
+      util::TempVectorHolder<uint16_t>(temp_stack_, *inout_num_selected);
   constexpr int category_nomatch = 0;
   constexpr int category_cmp = 1;
   constexpr int category_inserted = 2;
@@ -174,7 +174,7 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
        // Second condition in for loop:
        // We need to break processing and have the caller of this function
        // resize hash table if we reach max_groupid groups.
-       num_processed < inout_num_selected &&
+       num_processed < *inout_num_selected &&
        num_inserted_ + num_ids[category_inserted] < max_groupid;
        ++num_processed) {
     // row id in original batch
@@ -229,15 +229,15 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t& inout_num_selected
   }
 
   // Append any unprocessed entries
-  if (num_processed < inout_num_selected) {
+  if (num_processed < *inout_num_selected) {
     memmove(ids[category_nomatch] + num_ids[category_nomatch],
             inout_selection + num_processed,
-            sizeof(uint16_t) * (inout_num_selected - num_processed));
-    num_ids[category_nomatch] += (inout_num_selected - num_processed);
+            sizeof(uint16_t) * (*inout_num_selected - num_processed));
+    num_ids[category_nomatch] += (*inout_num_selected - num_processed);
   }
 
-  out_need_resize = num_processed < inout_num_selected;
-  inout_num_selected = num_ids[category_nomatch];
+  *out_need_resize = num_processed < *inout_num_selected;
+  *inout_num_selected = num_ids[category_nomatch];
   return Status::OK();
 }
 
@@ -293,7 +293,7 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
     uint16_t* ids_cmp = ids_cmp_buf.mutable_data();
     int num_ids_result;
     util::BitUtil::bits_split_indexes(cpu_instruction_set_, num_keys, match_bitvector,
-                                      num_ids_result, ids, ids_cmp);
+                                      &num_ids_result, ids, ids_cmp);
     num_ids = num_ids_result;
     uint32_t num_not_equal;
     equal_impl_(num_keys - num_ids, ids_cmp, out_groupids, &num_not_equal, ids + num_ids);
@@ -303,7 +303,7 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
   do {
     bool out_of_capacity;
     RETURN_NOT_OK(
-        lookup_2(hashes, num_ids, ids, out_of_capacity, out_groupids, slot_ids));
+        lookup_2(hashes, &num_ids, ids, &out_of_capacity, out_groupids, slot_ids));
     if (out_of_capacity) {
       RETURN_NOT_OK(grow_double());
       // Set slot_ids for selected vectors to first slot in new initial block.
