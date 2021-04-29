@@ -46,7 +46,7 @@ class KeyEncoder {
 
   /// Description of a storage format for rows produced by encoder.
   struct KeyRowMetadata {
-    uint32_t get_num_varbinary_cols() const {
+    uint32_t num_varbinary_cols() const {
       return cumulative_lengths_length / sizeof(uint32_t);
     }
     /// Is row a varying-length binary, using offsets array to find a beginning of a row,
@@ -78,8 +78,8 @@ class KeyEncoder {
     Status AppendEmpty(uint32_t num_rows_to_append, uint32_t num_extra_bytes_to_append);
     Status AppendSelectionFrom(const KeyRowArray& from, uint32_t num_rows_to_append,
                                const uint16_t* source_row_ids);
-    const KeyRowMetadata& get_metadata() const { return metadata_; }
-    int64_t get_length() const { return num_rows_; }
+    const KeyRowMetadata& metadata() const { return metadata_; }
+    int64_t length() const { return num_rows_; }
     const uint8_t* data(int i) const {
       ARROW_DCHECK(i >= 0 && i <= max_buffers_);
       return buffers_[i];
@@ -88,14 +88,10 @@ class KeyEncoder {
       ARROW_DCHECK(i >= 0 && i <= max_buffers_);
       return mutable_buffers_[i];
     }
-    const uint32_t* get_offsets() const {
-      return reinterpret_cast<const uint32_t*>(data(1));
-    }
-    uint32_t* get_mutable_offsets() {
-      return reinterpret_cast<uint32_t*>(mutable_data(1));
-    }
-    const uint8_t* get_null_masks() const { return null_masks_->data(); }
-    uint8_t* get_null_masks() { return null_masks_->mutable_data(); }
+    const uint32_t* offsets() const { return reinterpret_cast<const uint32_t*>(data(1)); }
+    uint32_t* mutable_offsets() { return reinterpret_cast<uint32_t*>(mutable_data(1)); }
+    const uint8_t* null_masks() const { return null_masks_->data(); }
+    uint8_t* null_masks() { return null_masks_->mutable_data(); }
 
     bool has_any_nulls(const KeyEncoderContext* ctx) const;
 
@@ -173,14 +169,10 @@ class KeyEncoder {
       ARROW_DCHECK(i >= 0 && i <= max_buffers_);
       return buffers_[i];
     }
-    uint32_t* get_mutable_offsets() {
-      return reinterpret_cast<uint32_t*>(mutable_data(1));
-    }
-    const uint32_t* get_offsets() const {
-      return reinterpret_cast<const uint32_t*>(data(1));
-    }
-    const KeyColumnMetadata& get_metadata() const { return metadata_; }
-    int64_t get_length() const { return length_; }
+    uint32_t* mutable_offsets() { return reinterpret_cast<uint32_t*>(mutable_data(1)); }
+    const uint32_t* offsets() const { return reinterpret_cast<const uint32_t*>(data(1)); }
+    const KeyColumnMetadata& metadata() const { return metadata_; }
+    int64_t length() const { return length_; }
 
    private:
     static constexpr int max_buffers_ = 3;
@@ -192,7 +184,7 @@ class KeyEncoder {
 
   void Init(const std::vector<KeyColumnMetadata>& cols, KeyEncoderContext* ctx);
 
-  const KeyRowMetadata& get_row_metadata() { return row_metadata_; }
+  const KeyRowMetadata& row_metadata() { return row_metadata_; }
 
   /// Find out the required sizes of all buffers output buffers for encoding
   /// (including varying-length buffers).
@@ -460,11 +452,11 @@ inline void KeyEncoder::EncoderBinary::EncodeDecodeHelper(
     const KeyRowArray* rows_const, KeyRowArray* rows_mutable_maybe_null,
     const KeyColumnArray* col_const, KeyColumnArray* col_mutable_maybe_null,
     COPY_FN copy_fn) {
-  ARROW_DCHECK(col_const && col_const->get_metadata().is_fixed_length);
-  uint32_t col_width = col_const->get_metadata().fixed_length;
+  ARROW_DCHECK(col_const && col_const->metadata().is_fixed_length);
+  uint32_t col_width = col_const->metadata().fixed_length;
 
   if (is_row_fixed_length) {
-    uint32_t row_width = rows_const->get_metadata().fixed_length;
+    uint32_t row_width = rows_const->metadata().fixed_length;
     for (uint32_t i = 0; i < num_rows; ++i) {
       const uint8_t* src;
       uint8_t* dst;
@@ -479,7 +471,7 @@ inline void KeyEncoder::EncoderBinary::EncodeDecodeHelper(
       copy_fn(dst, src, col_width);
     }
   } else {
-    const uint32_t* row_offsets = rows_const->get_offsets();
+    const uint32_t* row_offsets = rows_const->offsets();
     for (uint32_t i = 0; i < num_rows; ++i) {
       const uint8_t* src;
       uint8_t* dst;
@@ -503,23 +495,23 @@ inline void KeyEncoder::EncoderVarBinary::EncodeDecodeHelper(
     const KeyColumnArray* col_const, KeyColumnArray* col_mutable_maybe_null,
     COPY_FN copy_fn) {
   // Column and rows need to be varying length
-  ARROW_DCHECK(!rows_const->get_metadata().is_fixed_length &&
-               !col_const->get_metadata().is_fixed_length);
+  ARROW_DCHECK(!rows_const->metadata().is_fixed_length &&
+               !col_const->metadata().is_fixed_length);
 
-  const uint32_t* row_offsets_for_batch = rows_const->get_offsets() + start_row;
+  const uint32_t* row_offsets_for_batch = rows_const->offsets() + start_row;
 
-  const uint32_t* col_offsets = col_const->get_offsets();
+  const uint32_t* col_offsets = col_const->offsets();
 
   // Offset to the beginning of varbinary part of the row,
   // which comes after the fixed length column values and cummulative lengths of
   // varbinary values.
   const uint32_t first_varbinary_offset =
-      rows_const->get_metadata().fixed_length +
-      rows_const->get_metadata().cumulative_lengths_length;
+      rows_const->metadata().fixed_length +
+      rows_const->metadata().cumulative_lengths_length;
   // Offset withing each row to the cummulative varbinary value length related to
   // the given varbinary column id.
   const uint32_t cumulative_length_offset =
-      rows_const->get_metadata().fixed_length + varbinary_col_id * sizeof(uint32_t);
+      rows_const->metadata().fixed_length + varbinary_col_id * sizeof(uint32_t);
 
   uint32_t col_offset_next = col_offsets[0];
   for (uint32_t i = 0; i < num_rows; ++i) {

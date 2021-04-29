@@ -482,10 +482,9 @@ struct GrouperFastImpl : Grouper {
     }
 
     impl->encoder_.Init(impl->col_metadata_, &impl->encode_ctx_);
+    RETURN_NOT_OK(impl->rows_.Init(ctx->memory_pool(), impl->encoder_.row_metadata()));
     RETURN_NOT_OK(
-        impl->rows_.Init(ctx->memory_pool(), impl->encoder_.get_row_metadata()));
-    RETURN_NOT_OK(impl->rows_minibatch_.Init(ctx->memory_pool(),
-                                             impl->encoder_.get_row_metadata()));
+        impl->rows_minibatch_.Init(ctx->memory_pool(), impl->encoder_.row_metadata()));
     impl->minibatch_size_ = impl->minibatch_size_min_;
     GrouperFastImpl* impl_ptr = impl.get();
     auto equal_func = [impl_ptr](
@@ -550,15 +549,15 @@ struct GrouperFastImpl : Grouper {
       encoder_.Encode(start_row, batch_size_next, &rows_minibatch_, cols_);
 
       // Compute hash
-      if (encoder_.get_row_metadata().is_fixed_length) {
+      if (encoder_.row_metadata().is_fixed_length) {
         Hashing::hash_fixed(encode_ctx_.instr, batch_size_next,
-                            encoder_.get_row_metadata().fixed_length,
-                            rows_minibatch_.data(1), minibatch_hashes_.data());
+                            encoder_.row_metadata().fixed_length, rows_minibatch_.data(1),
+                            minibatch_hashes_.data());
       } else {
         auto hash_temp_buf =
             util::TempVectorHolder<uint32_t>(&temp_stack_, 4 * batch_size_next);
         Hashing::hash_varlen(encode_ctx_.instr, batch_size_next,
-                             rows_minibatch_.get_offsets(), rows_minibatch_.data(2),
+                             rows_minibatch_.offsets(), rows_minibatch_.data(2),
                              hash_temp_buf.mutable_data(), minibatch_hashes_.data());
       }
 
@@ -577,14 +576,12 @@ struct GrouperFastImpl : Grouper {
     return Datum(UInt32Array(batch.length, std::move(group_ids)));
   }
 
-  uint32_t num_groups() const override {
-    return static_cast<uint32_t>(rows_.get_length());
-  }
+  uint32_t num_groups() const override { return static_cast<uint32_t>(rows_.length()); }
 
   Result<ExecBatch> GetUniques() override {
     auto num_columns = static_cast<uint32_t>(col_metadata_.size());
-    int64_t num_groups = rows_.get_length();
-    bool is_row_fixedlen = rows_.get_metadata().is_fixed_length;
+    int64_t num_groups = rows_.length();
+    bool is_row_fixedlen = rows_.metadata().is_fixed_length;
 
     std::vector<std::shared_ptr<Buffer>> non_null_bufs(num_columns);
     std::vector<std::shared_ptr<Buffer>> fixedlen_bufs(num_columns);
@@ -626,7 +623,7 @@ struct GrouperFastImpl : Grouper {
       start_row += batch_size_next;
     }
 
-    if (!rows_.get_metadata().is_fixed_length) {
+    if (!rows_.metadata().is_fixed_length) {
       for (size_t i = 0; i < num_columns; ++i) {
         if (!col_metadata_[i].is_fixed_length) {
           auto varlen_size =

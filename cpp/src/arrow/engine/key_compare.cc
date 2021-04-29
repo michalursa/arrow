@@ -32,14 +32,13 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
                              uint16_t* out_sel_left_maybe_same,
                              const KeyEncoder::KeyRowArray& rows_left,
                              const KeyEncoder::KeyRowArray& rows_right) {
-  ARROW_DCHECK(rows_left.get_metadata().is_fixed_length ==
-               rows_right.get_metadata().is_fixed_length);
-  ARROW_DCHECK(rows_left.get_metadata().fixed_length ==
-               rows_right.get_metadata().fixed_length);
-  ARROW_DCHECK(rows_left.get_metadata().cumulative_lengths_length ==
-               rows_right.get_metadata().cumulative_lengths_length);
-  ARROW_DCHECK(rows_left.get_metadata().null_masks_bytes_per_row ==
-               rows_right.get_metadata().null_masks_bytes_per_row);
+  ARROW_DCHECK(rows_left.metadata().is_fixed_length ==
+               rows_right.metadata().is_fixed_length);
+  ARROW_DCHECK(rows_left.metadata().fixed_length == rows_right.metadata().fixed_length);
+  ARROW_DCHECK(rows_left.metadata().cumulative_lengths_length ==
+               rows_right.metadata().cumulative_lengths_length);
+  ARROW_DCHECK(rows_left.metadata().null_masks_bytes_per_row ==
+               rows_right.metadata().null_masks_bytes_per_row);
 
   if (num_rows_to_compare == 0) {
     *out_num_rows = 0;
@@ -59,14 +58,14 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
   // (AND it with comparison result) instead of overwriting it.
   memset(match_bytevector, 0xff, num_rows_to_compare);
 
-  if (rows_left.get_metadata().is_fixed_length) {
+  if (rows_left.metadata().is_fixed_length) {
     CompareFixedLength(num_rows_to_compare, sel_left_maybe_null, left_to_right_map,
-                       match_bytevector, ctx, rows_left.get_metadata().fixed_length,
+                       match_bytevector, ctx, rows_left.metadata().fixed_length,
                        rows_left.data(1), rows_right.data(1));
   } else {
     CompareVaryingLength(num_rows_to_compare, sel_left_maybe_null, left_to_right_map,
                          match_bytevector, ctx, rows_left.data(2), rows_right.data(2),
-                         rows_left.get_offsets(), rows_right.get_offsets());
+                         rows_left.offsets(), rows_right.offsets());
   }
 
   // CompareFixedLength can be used to compare nulls as well
@@ -74,8 +73,8 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
   if (nulls_present) {
     CompareFixedLength(num_rows_to_compare, sel_left_maybe_null, left_to_right_map,
                        match_bytevector, ctx,
-                       rows_left.get_metadata().null_masks_bytes_per_row,
-                       rows_left.get_null_masks(), rows_right.get_null_masks());
+                       rows_left.metadata().null_masks_bytes_per_row,
+                       rows_left.null_masks(), rows_right.null_masks());
   }
 
   util::BitUtil::bytes_to_bits(ctx->instr, num_rows_to_compare, match_bytevector,

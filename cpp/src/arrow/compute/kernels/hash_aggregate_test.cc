@@ -203,20 +203,10 @@ struct TestGrouper {
         max_right_id = right_ids[i];
       }
     }
-    std::vector<bool> right_to_left_present;
-    std::vector<bool> left_to_right_present;
-    std::vector<uint32_t> right_to_left;
-    std::vector<uint32_t> left_to_right;
-    right_to_left_present.resize(max_right_id + 1);
-    right_to_left.resize(max_right_id + 1);
-    left_to_right_present.resize(max_left_id + 1);
-    left_to_right.resize(max_left_id + 1);
-    for (int64_t i = 0; i <= max_left_id; ++i) {
-      left_to_right_present[i] = false;
-    }
-    for (int64_t i = 0; i <= max_right_id; ++i) {
-      right_to_left_present[i] = false;
-    }
+    std::vector<bool> right_to_left_present(max_right_id + 1, false);
+    std::vector<bool> left_to_right_present(max_left_id + 1, false);
+    std::vector<uint32_t> right_to_left(max_right_id + 1);
+    std::vector<uint32_t> left_to_right(max_left_id + 1);
     for (int64_t i = 0; i < num_ids; ++i) {
       uint32_t left_id = left_ids[i];
       uint32_t right_id = right_ids[i];

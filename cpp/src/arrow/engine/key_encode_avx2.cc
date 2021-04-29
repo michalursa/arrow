@@ -65,7 +65,7 @@ void KeyEncoder::EncoderBinary::EncodeImp_avx2(uint32_t offset_within_row,
                                                KeyRowArray* rows,
                                                const KeyColumnArray& col) {
   EncodeDecodeHelper<is_row_fixed_length, true>(
-      0, static_cast<uint32_t>(col.get_length()), offset_within_row, rows, rows, &col,
+      0, static_cast<uint32_t>(col.length()), offset_within_row, rows, rows, &col,
       nullptr, [](uint8_t* dst, const uint8_t* src, int64_t length) {
         __m256i* dst256 = reinterpret_cast<__m256i*>(dst);
         const __m256i* src256 = reinterpret_cast<const __m256i*>(src);
@@ -130,7 +130,7 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
                                                        KeyRowArray* rows,
                                                        const KeyColumnArray& col1,
                                                        const KeyColumnArray& col2) {
-  uint32_t num_rows = static_cast<uint32_t>(col1.get_length());
+  uint32_t num_rows = static_cast<uint32_t>(col1.length());
   ARROW_DCHECK(col_width == 1 || col_width == 2 || col_width == 4 || col_width == 8);
 
   const uint8_t* col_vals_A = col1.data(1);
@@ -171,14 +171,14 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
     if (col_width == 8) {
       __m128i *dst0, *dst1, *dst2, *dst3;
       if (is_row_fixed_length) {
-        uint32_t fixed_length = rows->get_metadata().fixed_length;
+        uint32_t fixed_length = rows->metadata().fixed_length;
         uint8_t* dst = row_vals + offset_within_row + fixed_length * i * unroll;
         dst0 = reinterpret_cast<__m128i*>(dst);
         dst1 = reinterpret_cast<__m128i*>(dst + fixed_length);
         dst2 = reinterpret_cast<__m128i*>(dst + fixed_length * 2);
         dst3 = reinterpret_cast<__m128i*>(dst + fixed_length * 3);
       } else {
-        const uint32_t* row_offsets = rows->get_offsets() + i * unroll;
+        const uint32_t* row_offsets = rows->offsets() + i * unroll;
         uint8_t* dst = row_vals + offset_within_row;
         dst0 = reinterpret_cast<__m128i*>(dst + row_offsets[0]);
         dst1 = reinterpret_cast<__m128i*>(dst + row_offsets[1]);
@@ -196,7 +196,7 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
       _mm256_storeu_si256(reinterpret_cast<__m256i*>(buffer) + 1, col_B);
 
       if (is_row_fixed_length) {
-        uint32_t fixed_length = rows->get_metadata().fixed_length;
+        uint32_t fixed_length = rows->metadata().fixed_length;
         uint8_t* dst = row_vals + offset_within_row + fixed_length * i * unroll;
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
@@ -211,7 +211,7 @@ uint32_t KeyEncoder::EncoderBinaryPair::EncodeImp_avx2(uint32_t offset_within_ro
           }
         }
       } else {
-        const uint32_t* row_offsets = rows->get_offsets() + i * unroll;
+        const uint32_t* row_offsets = rows->offsets() + i * unroll;
         uint8_t* dst = row_vals + offset_within_row;
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
@@ -266,14 +266,14 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
     for (uint32_t i = 0; i < num_rows / unroll; ++i) {
       const __m128i *src0, *src1, *src2, *src3;
       if (is_row_fixed_length) {
-        uint32_t fixed_length = rows.get_metadata().fixed_length;
+        uint32_t fixed_length = rows.metadata().fixed_length;
         const uint8_t* src = row_vals + offset_within_row + fixed_length * i * unroll;
         src0 = reinterpret_cast<const __m128i*>(src);
         src1 = reinterpret_cast<const __m128i*>(src + fixed_length);
         src2 = reinterpret_cast<const __m128i*>(src + fixed_length * 2);
         src3 = reinterpret_cast<const __m128i*>(src + fixed_length * 3);
       } else {
-        const uint32_t* row_offsets = rows.get_offsets() + i * unroll;
+        const uint32_t* row_offsets = rows.offsets() + i * unroll;
         const uint8_t* src = row_vals + offset_within_row;
         src0 = reinterpret_cast<const __m128i*>(src + row_offsets[0]);
         src1 = reinterpret_cast<const __m128i*>(src + row_offsets[1]);
@@ -300,7 +300,7 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
     uint8_t buffer[64];
     for (uint32_t i = 0; i < num_rows / unroll; ++i) {
       if (is_row_fixed_length) {
-        uint32_t fixed_length = rows.get_metadata().fixed_length;
+        uint32_t fixed_length = rows.metadata().fixed_length;
         const uint8_t* src = row_vals + offset_within_row + fixed_length * i * unroll;
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
@@ -315,7 +315,7 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
           }
         }
       } else {
-        const uint32_t* row_offsets = rows.get_offsets() + i * unroll;
+        const uint32_t* row_offsets = rows.offsets() + i * unroll;
         const uint8_t* src = row_vals + offset_within_row;
         for (int j = 0; j < unroll; ++j) {
           if (col_width == 1) {
@@ -376,10 +376,10 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
 uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
     KeyRowArray* rows, const std::vector<KeyColumnArray>& varbinary_cols,
     KeyColumnArray* temp_buffer_32B_per_col) {
-  ARROW_DCHECK(temp_buffer_32B_per_col->get_metadata().is_fixed_length &&
-               temp_buffer_32B_per_col->get_metadata().fixed_length ==
+  ARROW_DCHECK(temp_buffer_32B_per_col->metadata().is_fixed_length &&
+               temp_buffer_32B_per_col->metadata().fixed_length ==
                    static_cast<uint32_t>(sizeof(uint32_t)) &&
-               temp_buffer_32B_per_col->get_length() >=
+               temp_buffer_32B_per_col->length() >=
                    static_cast<int64_t>(varbinary_cols.size()) * 8);
 
   ARROW_DCHECK(varbinary_cols.size() > 0);
@@ -389,7 +389,7 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
   // computing varying-length component of output row offsets.
   uint32_t sum_offsets_first = 0;
   for (size_t col = 0; col < varbinary_cols.size(); ++col) {
-    ARROW_DCHECK(!varbinary_cols[col].get_metadata().is_fixed_length);
+    ARROW_DCHECK(!varbinary_cols[col].metadata().is_fixed_length);
     const uint32_t* col_offsets =
         reinterpret_cast<const uint32_t*>(varbinary_cols[col].data(1));
     sum_offsets_first += col_offsets[0];
@@ -398,7 +398,7 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
   // There is a fixed-length part in every row.
   // This needs to be included in calculation of row offsets.
   uint32_t fixed_part =
-      rows->get_metadata().fixed_length + rows->get_metadata().cumulative_lengths_length;
+      rows->metadata().fixed_length + rows->metadata().cumulative_lengths_length;
 
   // Difference between output row offset and direct sum of offsets for all columns
   __m256i offset_adjustment = _mm256_sub_epi32(
@@ -409,7 +409,7 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
 
   uint32_t* row_offsets = reinterpret_cast<uint32_t*>(rows->mutable_data(1));
   uint8_t* row_values = rows->mutable_data(2);
-  uint32_t num_rows = static_cast<uint32_t>(varbinary_cols[0].get_length());
+  uint32_t num_rows = static_cast<uint32_t>(varbinary_cols[0].length());
   constexpr int unroll = 8;
   uint32_t num_processed = num_rows / unroll * unroll;
   uint32_t* temp_cumulative_lengths =
@@ -477,7 +477,7 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
       for (uint32_t row = 0; row < unroll; ++row) {
         uint32_t* dst =
             reinterpret_cast<uint32_t*>(row_values + row_offsets[i * unroll + row] +
-                                        rows->get_metadata().fixed_length) +
+                                        rows->metadata().fixed_length) +
             col;
         const uint32_t* src = temp_cumulative_lengths + (col * unroll + row);
         *dst = *src;
@@ -503,8 +503,8 @@ void KeyEncoder::EncoderVarBinary::EncodeImp_avx2(uint32_t varbinary_col_id,
                                                   KeyRowArray* rows,
                                                   const KeyColumnArray& col) {
   EncodeDecodeHelper<first_varbinary_col, true>(
-      0, static_cast<uint32_t>(col.get_length()), varbinary_col_id, rows, rows, &col,
-      nullptr, [](uint8_t* dst, const uint8_t* src, int64_t length) {
+      0, static_cast<uint32_t>(col.length()), varbinary_col_id, rows, rows, &col, nullptr,
+      [](uint8_t* dst, const uint8_t* src, int64_t length) {
         __m256i* dst256 = reinterpret_cast<__m256i*>(dst);
         const __m256i* src256 = reinterpret_cast<const __m256i*>(src);
         uint32_t istripe;
