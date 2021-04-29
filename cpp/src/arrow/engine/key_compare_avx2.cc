@@ -56,10 +56,14 @@ uint32_t KeyCompare::CompareFixedLength_UpTo16B_avx2(
     uint32_t num_rows, const uint32_t* left_to_right_map, uint8_t* match_bytevector,
     uint32_t length, const uint8_t* rows_left, const uint8_t* rows_right) {
   ARROW_DCHECK(length <= 16);
+
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+  constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+
   __m256i mask =
       _mm256_cmpgt_epi8(_mm256_set1_epi8(length),
-                        _mm256_setr_epi64x(0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL,
-                                           0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL));
+                        _mm256_setr_epi64x(kByteSequence0To7, kByteSequence8To15,
+                                           kByteSequence0To7, kByteSequence8To15));
   const uint8_t* key_left_ptr = rows_left;
 
   constexpr uint32_t unroll = 2;
@@ -94,13 +98,18 @@ uint32_t KeyCompare::CompareFixedLength_avx2(uint32_t num_rows,
                                              const uint8_t* rows_right) {
   ARROW_DCHECK(length > 0);
 
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+  constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+  constexpr uint64_t kByteSequence16To23 = 0x1716151413121110ULL;
+  constexpr uint64_t kByteSequence24To31 = 0x1f1e1d1c1b1a1918ULL;
+
   // Non-zero length guarantees no underflow
   int32_t num_loops_less_one = (static_cast<int32_t>(length) + 31) / 32 - 1;
 
   __m256i tail_mask =
       _mm256_cmpgt_epi8(_mm256_set1_epi8(length - num_loops_less_one * 32),
-                        _mm256_setr_epi64x(0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL,
-                                           0x1716151413121110ULL, 0x1f1e1d1c1b1a1918ULL));
+                        _mm256_setr_epi64x(kByteSequence0To7, kByteSequence8To15,
+                                           kByteSequence16To23, kByteSequence24To31));
 
   for (uint32_t irow_left = 0; irow_left < num_rows; ++irow_left) {
     uint32_t irow_right = left_to_right_map[irow_left];
@@ -155,10 +164,15 @@ void KeyCompare::CompareVaryingLength_avx2(
       result_or = _mm256_or_si256(result_or, _mm256_xor_si256(key_left, key_right));
     }
 
-    __m256i tail_mask = _mm256_cmpgt_epi8(
-        _mm256_set1_epi8(length - i * 32),
-        _mm256_setr_epi64x(0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL,
-                           0x1716151413121110ULL, 0x1f1e1d1c1b1a1918ULL));
+    constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+    constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+    constexpr uint64_t kByteSequence16To23 = 0x1716151413121110ULL;
+    constexpr uint64_t kByteSequence24To31 = 0x1f1e1d1c1b1a1918ULL;
+
+    __m256i tail_mask =
+        _mm256_cmpgt_epi8(_mm256_set1_epi8(length - i * 32),
+                          _mm256_setr_epi64x(kByteSequence0To7, kByteSequence8To15,
+                                             kByteSequence16To23, kByteSequence24To31));
 
     __m256i key_left = _mm256_loadu_si256(key_left_ptr + i);
     __m256i key_right = _mm256_loadu_si256(key_right_ptr + i);

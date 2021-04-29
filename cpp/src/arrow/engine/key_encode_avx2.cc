@@ -25,10 +25,14 @@ namespace compute {
 #if defined(ARROW_HAVE_AVX2)
 
 inline __m256i set_first_n_bytes_avx2(int n) {
-  return _mm256_cmpgt_epi8(
-      _mm256_set1_epi8(n),
-      _mm256_setr_epi64x(0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL,
-                         0x1716151413121110ULL, 0x1f1e1d1c1b1a1918ULL));
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+  constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+  constexpr uint64_t kByteSequence16To23 = 0x1716151413121110ULL;
+  constexpr uint64_t kByteSequence24To31 = 0x1f1e1d1c1b1a1918ULL;
+
+  return _mm256_cmpgt_epi8(_mm256_set1_epi8(n),
+                           _mm256_setr_epi64x(kByteSequence0To7, kByteSequence8To15,
+                                              kByteSequence16To23, kByteSequence24To31));
 }
 
 inline __m256i inclusive_prefix_sum_32bit_avx2(__m256i x) {
@@ -335,10 +339,15 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
       __m256i r1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buffer) + 1);
 
       if (col_width == 1) {
+        constexpr uint64_t kByteSequence_0_2_4_6_8_10_12_14 = 0x0e0c0a0806040200ULL;
+        constexpr uint64_t kByteSequence_1_3_5_7_9_11_13_15 = 0x0f0d0b0907050301ULL;
+        constexpr uint64_t kByteSequence_0_1_4_5_8_9_12_13 = 0x0d0c090805040100ULL;
+        constexpr uint64_t kByteSequence_2_3_6_7_10_11_14_15 = 0x0f0e0b0a07060302ULL;
+
         // Collect every second byte next to each other
-        const __m256i shuffle_const =
-            _mm256_setr_epi64x(0x0e0c0a0806040200ULL, 0x0f0d0b0907050301ULL,
-                               0x0e0c0a0806040200ULL, 0x0f0d0b0907050301ULL);
+        const __m256i shuffle_const = _mm256_setr_epi64x(
+            kByteSequence_0_2_4_6_8_10_12_14, kByteSequence_1_3_5_7_9_11_13_15,
+            kByteSequence_0_2_4_6_8_10_12_14, kByteSequence_1_3_5_7_9_11_13_15);
         r0 = _mm256_shuffle_epi8(r0, shuffle_const);
         r1 = _mm256_shuffle_epi8(r1, shuffle_const);
         // 0b11011000 swapping second and third 64-bit lane
@@ -346,9 +355,9 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
         r1 = _mm256_permute4x64_epi64(r1, 0xd8);
       } else if (col_width == 2) {
         // Collect every second 16-bit word next to each other
-        const __m256i shuffle_const =
-            _mm256_setr_epi64x(0x0d0c090805040100ULL, 0x0f0e0b0a07060302ULL,
-                               0x0d0c090805040100ULL, 0x0f0e0b0a07060302ULL);
+        const __m256i shuffle_const = _mm256_setr_epi64x(
+            kByteSequence_0_1_4_5_8_9_12_13, kByteSequence_2_3_6_7_10_11_14_15,
+            kByteSequence_0_1_4_5_8_9_12_13, kByteSequence_2_3_6_7_10_11_14_15);
         r0 = _mm256_shuffle_epi8(r0, shuffle_const);
         r1 = _mm256_shuffle_epi8(r1, shuffle_const);
         // 0b11011000 swapping second and third 64-bit lane

@@ -46,9 +46,13 @@ void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
   // multiples of 64
   ARROW_DCHECK(num_bits % unroll == 0);
 
+  constexpr uint64_t kEachByteIs1 = 0X0101010101010101ULL;
+  constexpr uint64_t kEachByteIs8 = 0x0808080808080808ULL;
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+
   uint8_t byte_indexes[64];
-  const uint64_t incr = 0x0808080808080808ULL;
-  const uint64_t mask = 0x0706050403020100ULL;
+  const uint64_t incr = kEachByteIs8;
+  const uint64_t mask = kByteSequence0To7;
   *num_indexes = 0;
   for (int i = 0; i < num_bits / unroll; ++i) {
     uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
@@ -59,7 +63,7 @@ void BitUtil::bits_to_indexes_imp_avx2(const int num_bits, const uint8_t* bits,
     int num_indexes_loop = 0;
     while (word) {
       uint64_t byte_indexes_next =
-          _pext_u64(mask, _pdep_u64(word, UINT64_C(0X0101010101010101)) * 0xff) + base;
+          _pext_u64(mask, _pdep_u64(word, kEachByteIs1) * 0xff) + base;
       *reinterpret_cast<uint64_t*>(byte_indexes + num_indexes_loop) = byte_indexes_next;
       base += incr;
       num_indexes_loop += static_cast<int>(arrow::BitUtil::PopCount(word & 0xff));
@@ -98,7 +102,16 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
   // multiples of 64
   ARROW_DCHECK(num_bits % unroll == 0);
 
-  const uint64_t mask = 0xfedcba9876543210ULL;
+  constexpr uint64_t kRepeatedBitPattern0001 = 0x1111111111111111ULL;
+  constexpr uint64_t k4BitSequence0To15 = 0xfedcba9876543210ULL;
+  constexpr uint64_t kByteSequence_0_0_1_1_2_2_3_3 = 0x0303020201010000ULL;
+  constexpr uint64_t kByteSequence_4_4_5_5_6_6_7_7 = 0x0707060605050404ULL;
+  constexpr uint64_t kByteSequence_0_2_4_6_8_10_12_14 = 0x0e0c0a0806040200ULL;
+  constexpr uint64_t kByteSequence_1_3_5_7_9_11_13_15 = 0x0f0d0b0907050301ULL;
+  constexpr uint64_t kByteSequence_0_8_1_9_2_10_3_11 = 0x0b030a0209010800ULL;
+  constexpr uint64_t kByteSequence_4_12_5_13_6_14_7_15 = 0x0f070e060d050c04ULL;
+
+  const uint64_t mask = k4BitSequence0To15;
   int num_indexes = 0;
   for (int i = 0; i < num_bits / unroll; ++i) {
     uint64_t word = reinterpret_cast<const uint64_t*>(bits)[i];
@@ -109,12 +122,14 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
     int loop_id = 0;
     while (word) {
       uint64_t indexes_4bit =
-          _pext_u64(mask, _pdep_u64(word, UINT64_C(0x1111111111111111)) * 0xf);
+          _pext_u64(mask, _pdep_u64(word, kRepeatedBitPattern0001) * 0xf);
       // Unpack 4 bit indexes to 8 bits
       __m256i indexes_8bit = _mm256_set1_epi64x(indexes_4bit);
       indexes_8bit = _mm256_shuffle_epi8(
-          indexes_8bit, _mm256_setr_epi64x(0x0303020201010000ULL, 0x0707060605050404ULL,
-                                           0x0303020201010000ULL, 0x0707060605050404ULL));
+          indexes_8bit,
+          _mm256_setr_epi64x(kByteSequence_0_0_1_1_2_2_3_3, kByteSequence_4_4_5_5_6_6_7_7,
+                             kByteSequence_0_0_1_1_2_2_3_3,
+                             kByteSequence_4_4_5_5_6_6_7_7));
       indexes_8bit = _mm256_blendv_epi8(
           _mm256_and_si256(indexes_8bit, _mm256_set1_epi8(0x0f)),
           _mm256_and_si256(_mm256_srli_epi32(indexes_8bit, 4), _mm256_set1_epi8(0x0f)),
@@ -124,8 +139,9 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
       // Shuffle bytes to get low bytes in the first 128-bit lane and high bytes in the
       // second
       input = _mm256_shuffle_epi8(
-          input, _mm256_setr_epi64x(0x0e0c0a0806040200ULL, 0x0f0d0b0907050301ULL,
-                                    0x0e0c0a0806040200ULL, 0x0f0d0b0907050301ULL));
+          input, _mm256_setr_epi64x(
+                     kByteSequence_0_2_4_6_8_10_12_14, kByteSequence_1_3_5_7_9_11_13_15,
+                     kByteSequence_0_2_4_6_8_10_12_14, kByteSequence_1_3_5_7_9_11_13_15));
       input = _mm256_permute4x64_epi64(input, 0xd8);  // 0b11011000
       // Apply permutation
       __m256i output = _mm256_shuffle_epi8(input, indexes_8bit);
@@ -134,9 +150,11 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
       output = _mm256_permute4x64_epi64(output,
                                         0xd8);  // The reverse of swapping 2nd and 3rd
                                                 // 64-bit element is the same permutation
-      output = _mm256_shuffle_epi8(
-          output, _mm256_setr_epi64x(0x0b030a0209010800ULL, 0x0f070e060d050c04ULL,
-                                     0x0b030a0209010800ULL, 0x0f070e060d050c04ULL));
+      output = _mm256_shuffle_epi8(output,
+                                   _mm256_setr_epi64x(kByteSequence_0_8_1_9_2_10_3_11,
+                                                      kByteSequence_4_12_5_13_6_14_7_15,
+                                                      kByteSequence_0_8_1_9_2_10_3_11,
+                                                      kByteSequence_4_12_5_13_6_14_7_15));
       _mm256_storeu_si256((__m256i*)(indexes + num_indexes), output);
       num_indexes += static_cast<int>(arrow::BitUtil::PopCount(word & 0xffff));
       word >>= 16;
@@ -150,13 +168,18 @@ void BitUtil::bits_filter_indexes_imp_avx2(const int num_bits, const uint8_t* bi
 void BitUtil::bits_to_bytes_avx2(const int num_bits, const uint8_t* bits,
                                  uint8_t* bytes) {
   constexpr int unroll = 32;
+
+  constexpr uint64_t kEachByteIs1 = 0x0101010101010101ULL;
+  constexpr uint64_t kEachByteIs2 = 0x0202020202020202ULL;
+  constexpr uint64_t kEachByteIs3 = 0x0303030303030303ULL;
+  constexpr uint64_t kByteSequencePowersOf2 = 0x8040201008040201ULL;
+
   // Processing 32 bits at a time
   for (int i = 0; i < num_bits / unroll; ++i) {
     __m256i unpacked = _mm256_set1_epi32(reinterpret_cast<const uint32_t*>(bits)[i]);
     unpacked = _mm256_shuffle_epi8(
-        unpacked, _mm256_setr_epi64x(0x0000000000000000ULL, 0x0101010101010101ULL,
-                                     0x0202020202020202ULL, 0x0303030303030303ULL));
-    __m256i bits_in_bytes = _mm256_set1_epi64x(0x8040201008040201ULL);
+        unpacked, _mm256_setr_epi64x(0ULL, kEachByteIs1, kEachByteIs2, kEachByteIs3));
+    __m256i bits_in_bytes = _mm256_set1_epi64x(kByteSequencePowersOf2);
     unpacked =
         _mm256_cmpeq_epi8(bits_in_bytes, _mm256_and_si256(unpacked, bits_in_bytes));
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(bytes) + i, unpacked);

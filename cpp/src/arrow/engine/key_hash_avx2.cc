@@ -55,13 +55,15 @@ void Hashing::helper_stripes_avx2(uint32_t num_keys, uint32_t key_length,
   constexpr int unroll = 2;
   ARROW_DCHECK(num_keys % unroll == 0);
 
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+  constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+
   const __m256i mask_last_stripe =
       (key_length % 16) <= 8
           ? _mm256_set1_epi8(static_cast<char>(0xffU))
-          : _mm256_cmpgt_epi8(
-                _mm256_set1_epi8(key_length % 16),
-                _mm256_setr_epi64x(0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL,
-                                   0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL));
+          : _mm256_cmpgt_epi8(_mm256_set1_epi8(key_length % 16),
+                              _mm256_setr_epi64x(kByteSequence0To7, kByteSequence8To15,
+                                                 kByteSequence0To7, kByteSequence8To15));
 
   // If length modulo stripe length is less than or equal 8, round down to the nearest 16B
   // boundary (8B ending will be processed in a separate function), otherwise round up.
@@ -146,8 +148,10 @@ void Hashing::hash_varlen_avx2(uint32_t num_rows, const uint32_t* offsets,
                                const uint8_t* concatenated_keys,
                                uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
                                uint32_t* hashes) {
-  const __m128i sequence =
-      _mm_setr_epi32(0x03020100UL, 0x07060504UL, 0x0b0a0908UL, 0x0f0e0d0cUL);
+  constexpr uint64_t kByteSequence0To7 = 0x0706050403020100ULL;
+  constexpr uint64_t kByteSequence8To15 = 0x0f0e0d0c0b0a0908ULL;
+
+  const __m128i sequence = _mm_setr_epi64x(kByteSequence0To7, kByteSequence8To15);
   const __m128i acc_init = _mm_setr_epi32(
       static_cast<uint32_t>((static_cast<uint64_t>(PRIME32_1) + PRIME32_2) & 0xffffffff),
       PRIME32_2, 0, static_cast<uint32_t>(-static_cast<int32_t>(PRIME32_1)));

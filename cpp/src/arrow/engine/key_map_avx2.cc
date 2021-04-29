@@ -49,6 +49,9 @@ void SwissTable::lookup_1_avx2_x8(const int num_hashes, const uint32_t* hashes,
 
   // TODO: explain why it is ok to process hashes outside of buffer boundaries
   for (int i = 0; i < ((num_hashes + unroll - 1) / unroll); ++i) {
+    constexpr uint64_t kEachByteIs8 = 0x0808080808080808ULL;
+    constexpr uint64_t kByteSequenceOfPowersOf2 = 0x8040201008040201ULL;
+
     // Calculate block index and hash stamp for a byte in a block
     //
     __m256i vhash = _mm256_loadu_si256(vhash_ptr + i);
@@ -75,8 +78,7 @@ void SwissTable::lookup_1_avx2_x8(const int num_hashes, const uint32_t* hashes,
     __m256i vblock_highbits_B =
         _mm256_cmpeq_epi8(vblock_B, _mm256_set1_epi8(static_cast<unsigned char>(0x80)));
     __m256i vbyte_repeat_pattern =
-        _mm256_setr_epi64x(UINT64_C(0x0000000000000000), UINT64_C(0x0808080808080808),
-                           UINT64_C(0x0000000000000000), UINT64_C(0x0808080808080808));
+        _mm256_setr_epi64x(0ULL, kEachByteIs8, 0ULL, kEachByteIs8);
     vstamp_A = _mm256_shuffle_epi8(
         vstamp_A, _mm256_or_si256(vbyte_repeat_pattern, vblock_highbits_A));
     vstamp_B = _mm256_shuffle_epi8(
@@ -90,11 +92,11 @@ void SwissTable::lookup_1_avx2_x8(const int num_hashes, const uint32_t* hashes,
         _mm256_set1_epi8(static_cast<unsigned char>(0xff)));
     vmatches_A =
         _mm256_sad_epu8(_mm256_and_si256(_mm256_or_si256(vmatches_A, vblock_highbits_A),
-                                         _mm256_set1_epi64x(INT64_C(0x8040201008040201))),
+                                         _mm256_set1_epi64x(kByteSequenceOfPowersOf2)),
                         _mm256_setzero_si256());
     vmatches_B =
         _mm256_sad_epu8(_mm256_and_si256(_mm256_or_si256(vmatches_B, vblock_highbits_B),
-                                         _mm256_set1_epi64x(INT64_C(0x8040201008040201))),
+                                         _mm256_set1_epi64x(kByteSequenceOfPowersOf2)),
                         _mm256_setzero_si256());
     __m256i vmatches = _mm256_or_si256(vmatches_A, _mm256_slli_epi64(vmatches_B, 32));
 
@@ -229,12 +231,20 @@ void SwissTable::lookup_1_avx2_x32(const int num_hashes, const uint32_t* hashes,
   // What we output if there is no match in the block
   __m256i vslot_empty_or_end;
 
+  constexpr uint32_t k4ByteSequence_0_4_8_12 = 0x0c080400;
+  constexpr uint32_t k4ByteSequence_1_5_9_13 = 0x0d090501;
+  constexpr uint32_t k4ByteSequence_2_6_10_14 = 0x0e0a0602;
+  constexpr uint32_t k4ByteSequence_3_7_11_15 = 0x0f0b0703;
+  constexpr uint64_t kEachByteIs1 = 0x0101010101010101ULL;
+  constexpr uint64_t kByteSequence7DownTo0 = 0x0001020304050607ULL;
+  constexpr uint64_t kByteSequence15DownTo8 = 0x08090A0B0C0D0E0FULL;
+
   // Bit unpack group ids into 1B.
   // Assemble the sequence of block bytes.
   uint64_t block_bytes[16];
   uint64_t groupid_bytes[16];
   const int num_groupid_bits = log_blocks_ + 3;
-  uint64_t bit_unpack_mask = ((1 << num_groupid_bits) - 1) * UINT64_C(0x0101010101010101);
+  uint64_t bit_unpack_mask = ((1 << num_groupid_bits) - 1) * kEachByteIs1;
   for (int i = 0; i < (1 << log_blocks_); ++i) {
     uint64_t in_groupids =
         *reinterpret_cast<const uint64_t*>(blocks_ + (8 + num_groupid_bits) * i + 8);
@@ -255,8 +265,8 @@ void SwissTable::lookup_1_avx2_x32(const int num_hashes, const uint32_t* hashes,
       _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block_bytes) + 3);
   // Reverse the bytes in blocks
   __m256i vshuffle_const =
-      _mm256_setr_epi64x(UINT64_C(0x0001020304050607), UINT64_C(0x08090A0B0C0D0E0F),
-                         UINT64_C(0x0001020304050607), UINT64_C(0x08090A0B0C0D0E0F));
+      _mm256_setr_epi64x(kByteSequence7DownTo0, kByteSequence15DownTo8,
+                         kByteSequence7DownTo0, kByteSequence15DownTo8);
   vblock_words0 = _mm256_shuffle_epi8(vblock_words0, vshuffle_const);
   vblock_words1 = _mm256_shuffle_epi8(vblock_words1, vshuffle_const);
   vblock_words2 = _mm256_shuffle_epi8(vblock_words2, vshuffle_const);
@@ -353,9 +363,12 @@ void SwissTable::lookup_1_avx2_x32(const int num_hashes, const uint32_t* hashes,
     vslot_id = _mm256_add_epi8(vslot_id, _mm256_slli_epi32(vblock_id, 3));
     // So far the output is in the order: [0, 8, 16, 24, 1, 9, 17, 25, 2, 10, 18, 26, ...]
     vmatch_found = _mm256_shuffle_epi8(
-        vmatch_found, _mm256_setr_epi64x(0x0d0905010c080400ULL, 0x0f0b07030e0a0602ULL,
-                                         0x0d0905010c080400ULL, 0x0f0b07030e0a0602ULL));
-    // Not it is: [0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27, | 4, 5, 6, 7,
+        vmatch_found,
+        _mm256_setr_epi32(k4ByteSequence_0_4_8_12, k4ByteSequence_1_5_9_13,
+                          k4ByteSequence_2_6_10_14, k4ByteSequence_3_7_11_15,
+                          k4ByteSequence_0_4_8_12, k4ByteSequence_1_5_9_13,
+                          k4ByteSequence_2_6_10_14, k4ByteSequence_3_7_11_15));
+    // Now it is: [0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27, | 4, 5, 6, 7,
     // 12, 13, 14, 15, ...]
     vmatch_found = _mm256_permutevar8x32_epi32(vmatch_found,
                                                _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
