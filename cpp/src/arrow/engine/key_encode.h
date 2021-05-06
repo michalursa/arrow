@@ -21,6 +21,7 @@
 #include <memory>
 #include <vector>
 
+#include "arrow/util/bit_util.h"
 #include "arrow/engine/util.h"
 #include "arrow/memory_pool.h"
 #include "arrow/result.h"
@@ -28,6 +29,8 @@
 
 namespace arrow {
 namespace compute {
+
+class KeyColumnMetadata;
 
 /// Converts between key representation as a collection of arrays for
 /// individual columns and another representation as a single array of rows
@@ -44,30 +47,127 @@ class KeyEncoder {
     util::TempVectorStack* stack;
   };
 
+  /// Description of a storage format of a single key column as needed
+  /// for the purpose of row encoding.
+  struct KeyColumnMetadata {
+    KeyColumnMetadata() {}
+    KeyColumnMetadata(bool is_fixed_length_in, uint32_t fixed_length_in)
+        : is_fixed_length(is_fixed_length_in), fixed_length(fixed_length_in) {}
+    /// Is column storing a varying-length binary, using offsets array
+    /// to find a beginning of a value, or is it a fixed-length binary.
+    bool is_fixed_length;
+    /// For a fixed-length binary column: number of bytes per value.
+    /// Zero has a special meaning, indicating a bit vector with one bit per value.
+    /// For a varying-length binary column: number of bytes per offset.
+    uint32_t fixed_length;
+  };
+
   /// Description of a storage format for rows produced by encoder.
   struct KeyRowMetadata {
-    uint32_t num_varbinary_cols() const {
-      return cumulative_lengths_length / sizeof(uint32_t);
-    }
     /// Is row a varying-length binary, using offsets array to find a beginning of a row,
     /// or is it a fixed-length binary.
     bool is_fixed_length;
-    /// For a fixed-length binary row, common size of rows in bytes.
-    /// For a varying-length binary, size of all encoded fixed-length key columns.
-    /// Encoded fixed-length key columns in that case prefix the information
-    /// about all varying-length key columns.
+
+    /// For a fixed-length binary row, common size of rows in bytes, 
+    /// rounded up to the multiple of alignment.
+    ///
+    /// For a varying-length binary, size of all encoded fixed-length key columns, including lengths of varying-length columns,
+    /// rounded up to the multiple of string alignment.
     uint32_t fixed_length;
-    /// Size in bytes of optional cumulative lengths of varying-length key columns,
-    /// used when the row is not fixed length.
-    /// Zero for fixed-length row.
-    /// This number is equal to the number of varying-length key columns multiplied
-    /// by sizeof(uint32_t), which is the size of a single cumulative length.
-    uint32_t cumulative_lengths_length;
+
+    /// Offset within a row to the array of 32-bit offsets within a row of
+    /// ends of varbinary fields.
+    /// Used only when the row is not fixed-length, zero for fixed-length row.
+    /// There are N elements for N varbinary fields.
+    /// Each element is the offset within a row of the first byte after 
+    /// the corresponding varbinary field bytes in that row.
+    /// If varbinary fields begin at aligned addresses, than the end of the previous
+    /// varbinary field needs to be rounded up according to the specified alignment
+    /// to obtain the beginning of the next varbinary field.
+    /// The first varbinary field starts at offset specified by fixed_length,
+    /// which should already be aligned.
+    uint32_t varbinary_end_array_offset;
+
     /// Fixed number of bytes per row that are used to encode null masks.
     /// Null masks indicate for a single row which of its key columns are null.
     /// Nth bit in the sequence of bytes assigned to a row represents null
-    /// information for Nth key column.
+    /// information for Nth field according to the order in which they are encoded.
     int null_masks_bytes_per_row;
+
+    /// Power of 2. Every row will start at the offset aligned to that number of bytes.
+    int row_alignment;
+
+    /// Power of 2. Must be no greater than row alignment. 
+    /// Every non-power-of-2 binary field and every varbinary field bytes 
+    /// will start aligned to that number of bytes.
+    int string_alignment;
+
+    /// Metadata of encoded columns in their original order.
+    std::vector<KeyColumnMetadata> column_metadatas;
+
+    /// Order in which fields are encoded.
+    std::vector<uint32_t> column_order;
+    
+    /// Offsets within a row to fields in their encoding order.
+    std::vector<uint32_t> column_offsets;
+
+    /// Rounding up offset to the nearest multiple of alignment value.
+    /// Alignment must be a power of 2.
+    static inline uint32_t padding_for_alignment(uint32_t offset, int required_alignment) {
+      ARROW_DCHECK(ARROW_POPCOUNT64(required_alignment) == 1);
+      return static_cast<uint32_t>((-static_cast<int32_t>(offset)) & (required_alignment - 1));
+    }
+
+    /// Rounding up offset to the beginning of next column, 
+    /// chosing required alignment based on the data type of that column.
+    static inline uint32_t padding_for_alignment(uint32_t offset, int string_alignment, 
+                                          const KeyColumnMetadata& col_metadata) {
+      if (!col_metadata.is_fixed_length || ARROW_POPCOUNT64(col_metadata.fixed_length) <= 1) {
+        return 0;
+      } else {
+        return padding_for_alignment(offset, string_alignment);
+      }
+    }
+
+    /// Returns an array of offsets within a row of ends of varbinary fields.
+    inline const uint32_t* varbinary_end_array(const uint8_t* row) const {
+      ARROW_DCHECK(!is_fixed_length);
+      return reinterpret_cast<const uint32_t*>(row + varbinary_end_array_offset);
+    }
+    inline uint32_t* varbinary_end_array(uint8_t* row) const {
+      ARROW_DCHECK(!is_fixed_length);
+      return reinterpret_cast<uint32_t*>(row + varbinary_end_array_offset);
+    }
+
+    /// Returns the offset within the row and length of the first varbinary field.
+    inline void first_varbinary_offset_and_length(const uint8_t* row, uint32_t* offset, uint32_t* length) const {
+      ARROW_DCHECK(!is_fixed_length);
+      *offset = fixed_length;
+      *length = varbinary_end_array(row)[0] - fixed_length;
+    }
+
+    /// Returns the offset within the row and length of the second and further varbinary fields.
+    inline void nth_varbinary_offset_and_length(const uint8_t* row, int varbinary_id, uint32_t* out_offset, uint32_t* out_length) const {
+      ARROW_DCHECK(!is_fixed_length);
+      ARROW_DCHECK(varbinary_id > 0);
+      const uint32_t* varbinary_end = varbinary_end_array(row);
+      uint32_t offset = varbinary_end[varbinary_id - 1];
+      offset += padding_for_alignment(offset, string_alignment);
+      *out_offset = offset;
+      *out_length = varbinary_end[varbinary_id] - offset;
+    }
+
+    uint32_t encoded_field_order(uint32_t icol) const { return column_order[icol]; }
+    
+    uint32_t encoded_field_offset(uint32_t icol) const { return column_offsets[icol]; }
+
+    uint32_t num_cols() const { return static_cast<uint32_t>(column_metadatas.size()); }
+    
+    uint32_t num_varbinary_cols() const;
+
+    void FromColumnMetadataVector(const std::vector<KeyColumnMetadata> &cols, int in_row_alignment, int in_string_alignment);
+
+    bool is_compatible(const KeyRowMetadata& other) const;
   };
 
   class KeyRowArray {
@@ -124,21 +224,6 @@ class KeyEncoder {
     mutable bool has_any_nulls_;
   };
 
-  /// Description of a storage format of a single key column as needed
-  /// for the purpose of row encoding.
-  struct KeyColumnMetadata {
-    KeyColumnMetadata() {}
-    KeyColumnMetadata(bool is_fixed_length_in, uint32_t fixed_length_in)
-        : is_fixed_length(is_fixed_length_in), fixed_length(fixed_length_in) {}
-    /// Is column storing a varying-length binary, using offsets array
-    /// to find a beginning of a value, or is it a fixed-length binary.
-    bool is_fixed_length;
-    /// For a fixed-length binary column: number of bytes per value.
-    /// Zero has a special meaning, indicating a bit vector with one bit per value.
-    /// For a varying-length binary column: number of bytes per offset.
-    uint32_t fixed_length;
-  };
-
   /// A lightweight description of an array representing one of key columns.
   class KeyColumnArray {
    public:
@@ -182,8 +267,9 @@ class KeyEncoder {
     int64_t length_;
   };
 
-  void Init(const std::vector<KeyColumnMetadata>& cols, KeyEncoderContext* ctx);
-
+  void Init(const std::vector<KeyColumnMetadata>& cols, KeyEncoderContext* ctx,
+            int row_alignment, int string_alignment);
+  
   const KeyRowMetadata& row_metadata() { return row_metadata_; }
 
   /// Find out the required sizes of all buffers output buffers for encoding
@@ -218,9 +304,8 @@ class KeyEncoder {
                                   std::vector<KeyColumnArray>* cols);
 
  private:
-  void PrepareMetadata(const std::vector<KeyColumnMetadata>& col_metadata,
-                       KeyRowMetadata* out_row_metadata);
 
+ 
   /// Prepare column array vectors.
   /// Output column arrays represent a range of input column arrays
   /// specified by starting row and number of rows.
@@ -229,16 +314,7 @@ class KeyEncoder {
   /// - fixed-length columns only
   /// - varying-length columns only
   void PrepareKeyColumnArrays(int64_t start_row, int64_t num_rows,
-                              const std::vector<KeyColumnArray>& cols_in,
-                              std::vector<KeyColumnArray>* out_all_cols,
-                              std::vector<KeyColumnArray>* out_fixedbinary_cols,
-                              std::vector<KeyColumnArray>* out_varbinary_cols,
-                              std::vector<uint32_t>* batch_varbinary_cols_base_offsets);
-
-  void GetOutputBufferSizeForEncode(int64_t start_row, int64_t num_rows,
-                                    const KeyRowMetadata& row_metadata,
-                                    const std::vector<KeyColumnArray>& all_cols,
-                                    int64_t* out_num_bytes_required);
+                              const std::vector<KeyColumnArray>& cols_in);
 
   class TransformBoolean {
    public:
@@ -252,10 +328,10 @@ class KeyEncoder {
 
   class EncoderInteger {
    public:
-    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
+    static void Encode(uint32_t offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx,
                        KeyColumnArray* temp);
-    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
+    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
                        const KeyRowArray& rows, KeyColumnArray* col,
                        KeyEncoderContext* ctx, KeyColumnArray* temp);
     static bool UsesTransform(const KeyColumnArray& column);
@@ -272,10 +348,10 @@ class KeyEncoder {
 
   class EncoderBinary {
    public:
-    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
+    static void Encode(uint32_t offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx,
                        KeyColumnArray* temp);
-    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
+    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
                        const KeyRowArray& rows, KeyColumnArray* col,
                        KeyEncoderContext* ctx, KeyColumnArray* temp);
     static bool IsInteger(const KeyColumnMetadata& metadata);
@@ -326,11 +402,11 @@ class KeyEncoder {
                                const KeyColumnMetadata& col2) {
       return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2);
     }
-    static void Encode(uint32_t* offset_within_row, KeyRowArray* rows,
+    static void Encode(uint32_t offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col1, const KeyColumnArray& col2,
                        KeyEncoderContext* ctx, KeyColumnArray* temp1,
                        KeyColumnArray* temp2);
-    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t* offset_within_row,
+    static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
                        const KeyRowArray& rows, KeyColumnArray* col1,
                        KeyColumnArray* col2, KeyEncoderContext* ctx,
                        KeyColumnArray* temp1, KeyColumnArray* temp2);
@@ -439,9 +515,13 @@ class KeyEncoder {
   };
 
   KeyEncoderContext* ctx_;
+
+  // Data initialized once, based on data types of key columns
   KeyRowMetadata row_metadata_;
+
+  // Data initialized for each input batch.
+  // All elements are ordered according to the order of encoded fields in a row.
   std::vector<KeyColumnArray> batch_all_cols_;
-  std::vector<KeyColumnArray> batch_fixedbinary_cols_;
   std::vector<KeyColumnArray> batch_varbinary_cols_;
   std::vector<uint32_t> batch_varbinary_cols_base_offsets_;
 };
@@ -499,43 +579,25 @@ inline void KeyEncoder::EncoderVarBinary::EncodeDecodeHelper(
                !col_const->metadata().is_fixed_length);
 
   const uint32_t* row_offsets_for_batch = rows_const->offsets() + start_row;
-
   const uint32_t* col_offsets = col_const->offsets();
-
-  // Offset to the beginning of varbinary part of the row,
-  // which comes after the fixed length column values and cummulative lengths of
-  // varbinary values.
-  const uint32_t first_varbinary_offset =
-      rows_const->metadata().fixed_length +
-      rows_const->metadata().cumulative_lengths_length;
-  // Offset withing each row to the cummulative varbinary value length related to
-  // the given varbinary column id.
-  const uint32_t cumulative_length_offset =
-      rows_const->metadata().fixed_length + varbinary_col_id * sizeof(uint32_t);
 
   uint32_t col_offset_next = col_offsets[0];
   for (uint32_t i = 0; i < num_rows; ++i) {
     uint32_t col_offset = col_offset_next;
     col_offset_next = col_offsets[i + 1];
 
-    // Find offset to the beginning of varbinary data of this column in encoded row.
-    // The offset is the cumulative length of varbinary values for the previous varbinary
-    // column or zero for the first varbinary column.
     uint32_t row_offset = row_offsets_for_batch[i];
-    const uint32_t* cumulative_lengths = reinterpret_cast<const uint32_t*>(
-        rows_const->data(2) + row_offset + cumulative_length_offset);
-    uint32_t offset_within_varbinaries;
+    const uint8_t* row = rows_const->data(2) + row_offset;
+
+    uint32_t offset_within_row;
     uint32_t length;
     if (first_varbinary_col) {
-      offset_within_varbinaries = 0;
-      length = *cumulative_lengths;
+        rows_const->metadata().first_varbinary_offset_and_length(row, &offset_within_row, &length);
     } else {
-      uint64_t offsets_pair = *reinterpret_cast<const uint64_t*>(cumulative_lengths - 1);
-      offset_within_varbinaries = (offsets_pair & 0xffffffff);
-      length = (offsets_pair >> 32) - offset_within_varbinaries;
+        rows_const->metadata().nth_varbinary_offset_and_length(row, varbinary_col_id, &offset_within_row, &length);
     }
-    row_offset += first_varbinary_offset;
-    row_offset += offset_within_varbinaries;
+
+    row_offset += offset_within_row;
 
     const uint8_t* src;
     uint8_t* dst;

@@ -481,7 +481,7 @@ struct GrouperFastImpl : Grouper {
       impl->key_types_[icol] = key;
     }
 
-    impl->encoder_.Init(impl->col_metadata_, &impl->encode_ctx_);
+    impl->encoder_.Init(impl->col_metadata_, &impl->encode_ctx_, /* row_alignment = */ sizeof(uint64_t), /* string_alignment = */ sizeof(uint64_t));
     RETURN_NOT_OK(impl->rows_.Init(ctx->memory_pool(), impl->encoder_.row_metadata()));
     RETURN_NOT_OK(
         impl->rows_minibatch_.Init(ctx->memory_pool(), impl->encoder_.row_metadata()));

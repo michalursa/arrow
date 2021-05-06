@@ -32,13 +32,7 @@ void KeyCompare::CompareRows(uint32_t num_rows_to_compare,
                              uint16_t* out_sel_left_maybe_same,
                              const KeyEncoder::KeyRowArray& rows_left,
                              const KeyEncoder::KeyRowArray& rows_right) {
-  ARROW_DCHECK(rows_left.metadata().is_fixed_length ==
-               rows_right.metadata().is_fixed_length);
-  ARROW_DCHECK(rows_left.metadata().fixed_length == rows_right.metadata().fixed_length);
-  ARROW_DCHECK(rows_left.metadata().cumulative_lengths_length ==
-               rows_right.metadata().cumulative_lengths_length);
-  ARROW_DCHECK(rows_left.metadata().null_masks_bytes_per_row ==
-               rows_right.metadata().null_masks_bytes_per_row);
+  ARROW_DCHECK(rows_left.metadata().is_compatible(rows_right.metadata()));
 
   if (num_rows_to_compare == 0) {
     *out_num_rows = 0;

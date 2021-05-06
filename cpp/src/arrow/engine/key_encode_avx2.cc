@@ -385,110 +385,79 @@ uint32_t KeyEncoder::EncoderBinaryPair::DecodeImp_avx2(
 uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
     KeyRowArray* rows, const std::vector<KeyColumnArray>& varbinary_cols,
     KeyColumnArray* temp_buffer_32B_per_col) {
-  ARROW_DCHECK(temp_buffer_32B_per_col->metadata().is_fixed_length &&
-               temp_buffer_32B_per_col->metadata().fixed_length ==
+  ARROW_DCHECK(temp_buffer_32B_per_col.metadata().is_fixed_length &&
+               temp_buffer_32B_per_col.metadata().fixed_length ==
                    static_cast<uint32_t>(sizeof(uint32_t)) &&
-               temp_buffer_32B_per_col->length() >=
+               temp_buffer_32B_per_col.length() >=
                    static_cast<int64_t>(varbinary_cols.size()) * 8);
-
   ARROW_DCHECK(varbinary_cols.size() > 0);
 
-  // Add together first offset in every column.
-  // This value will be mapped to zero when
-  // computing varying-length component of output row offsets.
-  uint32_t sum_offsets_first = 0;
-  for (size_t col = 0; col < varbinary_cols.size(); ++col) {
-    ARROW_DCHECK(!varbinary_cols[col].metadata().is_fixed_length);
-    const uint32_t* col_offsets =
-        reinterpret_cast<const uint32_t*>(varbinary_cols[col].data(1));
-    sum_offsets_first += col_offsets[0];
-  }
+  int row_alignment = rows->metadata().row_alignment;
+  int string_alignment = rows->metadata().string_alignment;
 
-  // There is a fixed-length part in every row.
-  // This needs to be included in calculation of row offsets.
-  uint32_t fixed_part =
-      rows->metadata().fixed_length + rows->metadata().cumulative_lengths_length;
-
-  // Difference between output row offset and direct sum of offsets for all columns
-  __m256i offset_adjustment = _mm256_sub_epi32(
-      _mm256_setr_epi32(fixed_part * 1, fixed_part * 2, fixed_part * 3, fixed_part * 4,
-                        fixed_part * 5, fixed_part * 6, fixed_part * 7, fixed_part * 8),
-      _mm256_set1_epi32(sum_offsets_first));
-  __m256i offset_adjustment_incr = _mm256_set1_epi32(fixed_part * 8);
-
-  uint32_t* row_offsets = reinterpret_cast<uint32_t*>(rows->mutable_data(1));
+  uint32_t* row_offsets = rows->mutable_offsets();
   uint8_t* row_values = rows->mutable_data(2);
   uint32_t num_rows = static_cast<uint32_t>(varbinary_cols[0].length());
+
   constexpr int unroll = 8;
   uint32_t num_processed = num_rows / unroll * unroll;
-  uint32_t* temp_cumulative_lengths =
-      reinterpret_cast<uint32_t*>(temp_buffer_32B_per_col->mutable_data(1));
+  uint32_t* temp_varbinary_ends =
+      reinterpret_cast<uint32_t*>(temp_buffer_32B_per_col.mutable_data(1));
 
   row_offsets[0] = 0;
+
+  __m256i row_offset = _mm256_setzero_si256();
   for (uint32_t i = 0; i < num_rows / unroll; ++i) {
     // Zero out lengths for nulls.
-    // Add horizontally offsets, after adjustment for nulls, to
-    // produce row offsets.
-    // Add horizontally and store in temp buffer lengths,
-    // after adjustment for nulls,
-    // to produce cumulative lengths of individual column values in each row.
-    bool any_nulls = false;
-    __m256i col_null_length_sum = _mm256_setzero_si256();
-    __m256i col_offset_sum = _mm256_setzero_si256();
-    __m256i col_length_sum = _mm256_setzero_si256();
+    // Add lengths of all columns to get row size.
+    // Store in temp buffer varbinary field ends while summing their lengths.
+
+    __m256i offset_within_row = _mm256_set1_epi32(rows->metadata().fixed_length);
+
     for (size_t col = 0; col < varbinary_cols.size(); ++col) {
-      const uint32_t* col_offsets =
-          reinterpret_cast<const uint32_t*>(varbinary_cols[col].data(1));
-      __m256i col_offset =
-          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(col_offsets + 1) + i);
+      const uint32_t* col_offsets = varbinary_cols[col].offsets();
       __m256i col_length = _mm256_sub_epi32(
-          col_offset,
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(col_offsets + 1) + i),
           _mm256_loadu_si256(reinterpret_cast<const __m256i*>(col_offsets + 0) + i));
-      col_offset_sum = _mm256_add_epi32(col_offset_sum, col_offset);
 
       const uint8_t* non_nulls = varbinary_cols[col].data(0);
       if (non_nulls && non_nulls[i] != 0xff) {
         // Zero out lengths for values that are not null
-        any_nulls = true;
         const __m256i individual_bits =
             _mm256_setr_epi32(0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80);
         __m256i null_mask = _mm256_cmpeq_epi32(
             _mm256_setzero_si256(),
             _mm256_and_si256(_mm256_set1_epi32(non_nulls[i]), individual_bits));
-        __m256i null_length = _mm256_and_si256(col_length, null_mask);
-        col_null_length_sum = _mm256_add_epi32(col_null_length_sum, null_length);
-        col_length = _mm256_sub_epi32(col_length, null_length);
+        col_length = _mm256_andnot_si256(null_mask, col_length);
       }
 
-      col_length_sum = _mm256_add_epi32(col_length_sum, col_length);
-      _mm256_storeu_si256(reinterpret_cast<__m256i*>(temp_cumulative_lengths) + col,
-                          col_length_sum);
+      __m256i padding = _mm256_and_si256(
+          _mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row), 
+          _mm256_set1_epi32(string_alignment - 1));
+      offset_within_row = _mm256_add_epi32(offset_within_row, padding);
+      offset_within_row = _mm256_add_epi32(offset_within_row, col_length);
+
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(temp_varbinary_ends) + col,
+                          offset_within_row);
     }
 
-    // Add fixed-length part to row offsets
-    __m256i row_offset = _mm256_add_epi32(col_offset_sum, offset_adjustment);
-    offset_adjustment = _mm256_add_epi32(offset_adjustment, offset_adjustment_incr);
+    __m256i padding = _mm256_and_si256(
+        _mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row), 
+        _mm256_set1_epi32(row_alignment - 1));
+    offset_within_row = _mm256_add_epi32(offset_within_row, padding);
 
-    // Adjustments for nulls
-    if (any_nulls) {
-      // Inclusive prefix sum of 32-bit elements
-      col_null_length_sum = inclusive_prefix_sum_32bit_avx2(col_null_length_sum);
-      row_offset = _mm256_sub_epi32(row_offset, col_null_length_sum);
-      offset_adjustment = _mm256_sub_epi32(
-          offset_adjustment,
-          _mm256_permutevar8x32_epi32(col_null_length_sum, _mm256_set1_epi32(7)));
-    }
+    // Inclusive prefix sum of 32-bit elements
+    __m256i row_offset_delta = inclusive_prefix_sum_32bit_avx2(offset_within_row);
+    row_offset = _mm256_add_epi32(
+      _mm256_permutevar8x32_epi32(row_offset, _mm256_set1_epi32(7)), row_offset_delta);
 
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(row_offsets + 1) + i, row_offset);
 
-    // Output cumulative varbinary key column lengths for each row
+    // Output varbinary ends for all fields in each row
     for (size_t col = 0; col < varbinary_cols.size(); ++col) {
       for (uint32_t row = 0; row < unroll; ++row) {
-        uint32_t* dst =
-            reinterpret_cast<uint32_t*>(row_values + row_offsets[i * unroll + row] +
-                                        rows->metadata().fixed_length) +
-            col;
-        const uint32_t* src = temp_cumulative_lengths + (col * unroll + row);
+        uint32_t* dst = rows->metadata().varbinary_end_array(row_values + row_offsets[i * unroll + row]) + col;
+        const uint32_t* src = temp_varbinary_ends + (col * unroll + row);
         *dst = *src;
       }
     }
