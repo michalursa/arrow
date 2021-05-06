@@ -23,6 +23,7 @@
 
 #include "arrow/engine/util.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/ubsan.h"
 
 namespace arrow {
 namespace compute {
@@ -680,11 +681,11 @@ void KeyEncoder::EncoderBinary::EncodeImp(uint32_t offset_within_row, KeyRowArra
         const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
         uint32_t istripe;
         for (istripe = 0; istripe < length / 8; ++istripe) {
-          dst64[istripe] = src64[istripe];
+          dst64[istripe] = util::SafeLoad(src64 + istripe);
         }
         if ((length % 8) > 0) {
           uint64_t mask_last = ~0ULL >> (8 * (8 * (istripe + 1) - length));
-          dst64[istripe] = (dst64[istripe] & ~mask_last) | (src64[istripe] & mask_last);
+          dst64[istripe] = (dst64[istripe] & ~mask_last) | (util::SafeLoad(src64 + istripe) & mask_last);
         }
       });
 }
@@ -699,7 +700,7 @@ void KeyEncoder::EncoderBinary::DecodeImp(uint32_t start_row, uint32_t num_rows,
         for (uint32_t istripe = 0; istripe < (length + 7) / 8; ++istripe) {
           uint64_t* dst64 = reinterpret_cast<uint64_t*>(dst);
           const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
-          dst64[istripe] = src64[istripe];
+          util::SafeStore(dst64 + istripe, src64[istripe]);
         }
       });
 }
@@ -1197,11 +1198,11 @@ void KeyEncoder::EncoderVarBinary::EncodeImp(uint32_t varbinary_col_id, KeyRowAr
         const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
         uint32_t istripe;
         for (istripe = 0; istripe < length / 8; ++istripe) {
-          dst64[istripe] = src64[istripe];
+          dst64[istripe] = util::SafeLoad(src64 + istripe);
         }
         if ((length % 8) > 0) {
           uint64_t mask_last = ~0ULL >> (8 * (8 * (istripe + 1) - length));
-          dst64[istripe] = (dst64[istripe] & ~mask_last) | (src64[istripe] & mask_last);
+          dst64[istripe] = (dst64[istripe] & ~mask_last) | (util::SafeLoad(src64 + istripe) & mask_last);
         }
       });
 }
@@ -1217,7 +1218,7 @@ void KeyEncoder::EncoderVarBinary::DecodeImp(uint32_t start_row, uint32_t num_ro
         for (uint32_t istripe = 0; istripe < (length + 7) / 8; ++istripe) {
           uint64_t* dst64 = reinterpret_cast<uint64_t*>(dst);
           const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src);
-          dst64[istripe] = src64[istripe];
+          util::SafeStore(dst64 + istripe, src64[istripe]);
         }
       });
 }
