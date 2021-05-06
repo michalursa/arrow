@@ -63,14 +63,13 @@ inline void SwissTable::search_block(uint64_t block, int stamp, int start_slot,
 
 inline uint64_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
                                              uint64_t group_id_mask) {
-  int num_bits_group_id = log_blocks_ + 3;
   // TODO: Explain why slot can be from 0 to 8 (inclusive) as input and in case of 8 we
   // just need to output any valid group id, so we take the one from slot 0 in the block.
-  int bit_offset = (slot & 7) * num_bits_group_id;
-  const uint8_t* group_id_bytes = (block_ptr + sizeof(uint64_t) + (bit_offset >> 3));
-  uint64_t group_id =
-      (*reinterpret_cast<const uint64_t*>(group_id_bytes) >> (bit_offset & 7)) &
-      group_id_mask;
+  int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+  int bit_offset = (slot & 7) * num_groupid_bits;
+  const uint64_t* group_id_bytes =
+      reinterpret_cast<const uint64_t*>(block_ptr) + 1 + (bit_offset >> 6);
+  uint64_t group_id = (*group_id_bytes >> (bit_offset & 63)) & group_id_mask;
   return group_id;
 }
 
@@ -85,8 +84,8 @@ void SwissTable::lookup_1(const uint16_t* selection, const int num_keys,
                           uint32_t* out_groupids, uint32_t* out_slot_ids) {
   memset(out_match_bitvector, 0, (num_keys + 7) / 8);
 
-  const int num_groupid_bits = log_blocks_ + 3;
   uint32_t stamp_mask = (1 << bits_stamp_) - 1;
+  int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   uint32_t groupid_mask = (1 << num_groupid_bits) - 1;
 
   for (int i = 0; i < num_keys; ++i) {
@@ -165,7 +164,7 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t* inout_num_selected
 
   uint64_t slot_id_mask = (1 << (log_blocks_ + 3)) - 1;
   uint64_t groupid_mask = slot_id_mask;
-  uint64_t num_groupid_bits = log_blocks_ + 3;
+  uint64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   constexpr uint64_t stamp_mask = 0x7f;
   uint64_t num_block_bytes = (8 + num_groupid_bits);
 
@@ -193,8 +192,8 @@ Status SwissTable::lookup_2(const uint32_t* hashes, uint32_t* inout_num_selected
       blockbase[7 - start_slot] = static_cast<uint8_t>(stamp);
       int groupid_bit_offset = static_cast<int>(start_slot * num_groupid_bits);
       uint32_t group_id = num_inserted_ + num_ids[category_inserted];
-      *reinterpret_cast<uint64_t*>(blockbase + 8 + (groupid_bit_offset >> 3)) |=
-          (group_id << (groupid_bit_offset & 7));
+      reinterpret_cast<uint64_t*>(blockbase + 8)[groupid_bit_offset >> 6] |=
+          (static_cast<uint64_t>(group_id) << (groupid_bit_offset & 63));
       hashes_[slot_id] = hash;
       out_group_ids[id] = group_id;
       push_id(category_inserted, id);
@@ -318,8 +317,8 @@ Status SwissTable::map(const int num_keys, const uint32_t* hashes,
 
 Status SwissTable::grow_double() {
   // Before and after metadata
-  int num_group_id_bits_before = log_blocks_ + 3;
-  int num_group_id_bits_after = num_group_id_bits_before + 1;
+  int num_group_id_bits_before = num_groupid_bits_from_log_blocks(log_blocks_);
+  int num_group_id_bits_after = num_groupid_bits_from_log_blocks(log_blocks_ + 1);
   uint64_t group_id_mask_before = ~0ULL >> (64 - num_group_id_bits_before);
   int log_blocks_before = log_blocks_;
   int log_blocks_after = log_blocks_ + 1;
@@ -453,7 +452,7 @@ Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool*
   append_impl_ = append_impl;
 
   log_blocks_ = 0;
-  const int num_groupid_bits = log_blocks_ + 3;
+  int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   num_inserted_ = 0;
 
   const uint64_t cbblocks = ((8 + num_groupid_bits) << log_blocks_) + padding_;
@@ -465,7 +464,8 @@ Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool*
         kHighBitOfEachByte;
   }
 
-  const uint64_t cbhashes = (sizeof(uint32_t) << num_groupid_bits) + padding_;
+  int log_slots = log_blocks_ + 3;
+  const uint64_t cbhashes = (sizeof(uint32_t) << log_slots) + padding_;
   uint8_t* hashes8;
   RETURN_NOT_OK(pool_->Allocate(cbhashes, &hashes8));
   hashes_ = reinterpret_cast<uint32_t*>(hashes8);
@@ -474,14 +474,15 @@ Status SwissTable::init(util::CPUInstructionSet cpu_instruction_set, MemoryPool*
 }
 
 void SwissTable::cleanup() {
-  const int cgroupidbits = log_blocks_ + 3;
   if (blocks_) {
-    const uint64_t cbblocks = ((8 + cgroupidbits) << log_blocks_) + padding_;
+    int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+    const uint64_t cbblocks = ((8 + num_groupid_bits) << log_blocks_) + padding_;
     pool_->Free(blocks_, cbblocks);
     blocks_ = nullptr;
   }
   if (hashes_) {
-    const uint64_t cbhashes = (sizeof(uint32_t) << cgroupidbits) + padding_;
+    uint64_t num_slots = 1 << (log_blocks_ + 3);
+    const uint64_t cbhashes = sizeof(uint32_t) * num_slots + padding_;
     pool_->Free(reinterpret_cast<uint8_t*>(hashes_), cbhashes);
     hashes_ = nullptr;
   }

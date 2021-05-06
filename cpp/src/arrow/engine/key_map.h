@@ -126,6 +126,10 @@ class SwissTable {
   // Resize large hash tables when 75% full.
   Status grow_double();
 
+  static int num_groupid_bits_from_log_blocks(int log_blocks) {
+    return ((log_blocks + 3) + 7) / 8 * 8;
+  }
+
   // Use 32-bit hash for now
   static constexpr int bits_hash_ = 32;
 

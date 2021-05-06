@@ -431,9 +431,9 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
         col_length = _mm256_andnot_si256(null_mask, col_length);
       }
 
-      __m256i padding = _mm256_and_si256(
-          _mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row), 
-          _mm256_set1_epi32(string_alignment - 1));
+      __m256i padding =
+          _mm256_and_si256(_mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row),
+                           _mm256_set1_epi32(string_alignment - 1));
       offset_within_row = _mm256_add_epi32(offset_within_row, padding);
       offset_within_row = _mm256_add_epi32(offset_within_row, col_length);
 
@@ -441,22 +441,24 @@ uint32_t KeyEncoder::EncoderOffsets::EncodeImp_avx2(
                           offset_within_row);
     }
 
-    __m256i padding = _mm256_and_si256(
-        _mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row), 
-        _mm256_set1_epi32(row_alignment - 1));
+    __m256i padding =
+        _mm256_and_si256(_mm256_sub_epi32(_mm256_setzero_si256(), offset_within_row),
+                         _mm256_set1_epi32(row_alignment - 1));
     offset_within_row = _mm256_add_epi32(offset_within_row, padding);
 
     // Inclusive prefix sum of 32-bit elements
     __m256i row_offset_delta = inclusive_prefix_sum_32bit_avx2(offset_within_row);
     row_offset = _mm256_add_epi32(
-      _mm256_permutevar8x32_epi32(row_offset, _mm256_set1_epi32(7)), row_offset_delta);
+        _mm256_permutevar8x32_epi32(row_offset, _mm256_set1_epi32(7)), row_offset_delta);
 
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(row_offsets + 1) + i, row_offset);
 
     // Output varbinary ends for all fields in each row
     for (size_t col = 0; col < varbinary_cols.size(); ++col) {
       for (uint32_t row = 0; row < unroll; ++row) {
-        uint32_t* dst = rows->metadata().varbinary_end_array(row_values + row_offsets[i * unroll + row]) + col;
+        uint32_t* dst = rows->metadata().varbinary_end_array(
+                            row_values + row_offsets[i * unroll + row]) +
+                        col;
         const uint32_t* src = temp_varbinary_ends + (col * unroll + row);
         *dst = *src;
       }
