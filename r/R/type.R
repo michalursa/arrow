@@ -37,9 +37,6 @@ DataType <- R6Class("DataType",
     Equals = function(other, ...) {
       inherits(other, "DataType") && DataType__Equals(self, other)
     },
-    num_fields = function() {
-      DataType__num_fields(self)
-    },
     fields = function() {
       DataType__fields(self)
     }
@@ -47,7 +44,8 @@ DataType <- R6Class("DataType",
 
   active = list(
     id = function() DataType__id(self),
-    name = function() DataType__name(self)
+    name = function() DataType__name(self),
+    num_fields = function() DataType__num_fields(self)
   )
 )
 
@@ -59,6 +57,13 @@ FLOAT_TYPES <- c("float16", "float32", "float64", "halffloat", "float", "double"
 #' @param x an R vector
 #'
 #' @return an arrow logical type
+#' @examplesIf arrow_available()
+#' type(1:10)
+#' type(1L:10L)
+#' type(c(1, 1.5, 2))
+#' type(c("A", "B", "C"))
+#' type(mtcars)
+#' type(Sys.Date())
 #' @export
 type <- function(x) UseMethod("type")
 
@@ -66,11 +71,7 @@ type <- function(x) UseMethod("type")
 type.default <- function(x) Array__infer_type(x)
 
 #' @export
-type.Array <- function(x) x$type
-
-#' @export
-type.ChunkedArray <- function(x) x$type
-
+type.ArrowDatum <- function(x) x$type
 
 #----- metadata
 
@@ -162,11 +163,20 @@ NestedType <- R6Class("NestedType", inherit = DataType)
 #' * `float16()` and `halffloat()`
 #' * `float32()` and `float()`
 #' * `bool()` and `boolean()`
-#' * Called from `schema()` or `struct()`, `double()` also is supported as a
-#' way of creating a `float64()`
+#' * When called inside an `arrow` function, such as `schema()` or `cast()`,
+#' `double()` also is supported as a way of creating a `float64()`
 #'
 #' `date32()` creates a datetime type with a "day" unit, like the R `Date`
 #' class. `date64()` has a "ms" unit.
+#'
+#' `uint32` (32 bit unsigned integer), `uint64` (64 bit unsigned integer), and
+#' `int64` (64-bit signed integer) types may contain values that exceed the
+#' range of R's `integer` type (32-bit signed integer). When these arrow objects
+#' are translated to R objects, `uint32` and `uint64` are converted to `double`
+#' ("numeric") and `int64` is converted to `bit64::integer64`. For `int64`
+#' types, this conversion can be disabled (so that `int64` always yields a
+#' `bit64::integer64` object) by setting `options(arrow.int64_downcast =
+#' FALSE)`.
 #'
 #' @param unit For time/timestamp types, the time unit. `time32()` can take
 #' either "s" or "ms", while `time64()` can be "us" or "ns". `timestamp()` can
@@ -183,13 +193,11 @@ NestedType <- R6Class("NestedType", inherit = DataType)
 #' @return An Arrow type object inheriting from DataType.
 #' @export
 #' @seealso [dictionary()] for creating a dictionary (factor-like) type.
-#' @examples
-#' \donttest{
+#' @examplesIf arrow_available()
 #' bool()
 #' struct(a = int32(), b = double())
 #' timestamp("ms", timezone = "CEST")
 #' time64("ns")
-#' }
 int8 <- function() Int8__initialize()
 
 #' @rdname data-type
@@ -357,9 +365,61 @@ decimal <- function(precision, scale) {
   Decimal128Type__initialize(precision, scale)
 }
 
+StructType <- R6Class("StructType",
+  inherit = NestedType,
+  public = list(
+    GetFieldByName = function(name) StructType__GetFieldByName(self, name),
+    GetFieldIndex = function(name) StructType__GetFieldIndex(self, name)
+  )
+)
+StructType$create <- function(...) struct__(.fields(list(...)))
+
+#' @rdname data-type
+#' @export
+struct <- StructType$create
+
+ListType <- R6Class("ListType",
+  inherit = NestedType,
+  active = list(
+    value_field = function() ListType__value_field(self),
+    value_type = function() ListType__value_type(self)
+  )
+)
+
+#' @rdname data-type
+#' @export
+list_of <- function(type) list__(type)
+
+LargeListType <- R6Class("LargeListType",
+  inherit = NestedType,
+  active = list(
+    value_field = function() LargeListType__value_field(self),
+    value_type = function() LargeListType__value_type(self)
+  )
+)
+
+#' @rdname data-type
+#' @export
+large_list_of <- function(type) large_list__(type)
+
+#' @rdname data-type
+#' @export
+FixedSizeListType <- R6Class("FixedSizeListType",
+  inherit = NestedType,
+  active = list(
+    value_field = function() FixedSizeListType__value_field(self),
+    value_type = function() FixedSizeListType__value_type(self),
+    list_size = function() FixedSizeListType__list_size(self)
+  )
+)
+
+#' @rdname data-type
+#' @export
+fixed_size_list_of <- function(type, list_size) fixed_size_list__(type, list_size)
+
 as_type <- function(type, name = "type") {
+  # magic so we don't have to mask base::double()
   if (identical(type, double())) {
-    # Magic so that we don't have to mask this base function
     type <- float64()
   }
   if (!inherits(type, "DataType")) {
@@ -368,6 +428,54 @@ as_type <- function(type, name = "type") {
   type
 }
 
+canonical_type_str <- function(type_str) {
+  # canonicalizes data type strings, converting data type function names and
+  # aliases to match the strings returned by DataType$ToString()
+  assert_that(is.string(type_str))
+  if (grepl("[([<]", type_str)) {
+    stop("Cannot interpret string representations of data types that have parameters", call. = FALSE)
+  }
+  switch(type_str,
+    int8 = "int8",
+    int16 = "int16",
+    int32 = "int32",
+    int64 = "int64",
+    uint8 = "uint8",
+    uint16 = "uint16",
+    uint32 = "uint32",
+    uint64 = "uint64",
+    float16 = "halffloat",
+    halffloat = "halffloat",
+    float32 = "float",
+    float = "float",
+    float64 = "double",
+    double = "double",
+    boolean = "bool",
+    bool = "bool",
+    utf8 = "string",
+    large_utf8 = "large_string",
+    large_string = "large_string",
+    binary = "binary",
+    large_binary = "large_binary",
+    fixed_size_binary = "fixed_size_binary",
+    string = "string",
+    date32 = "date32",
+    date64 = "date64",
+    time32 = "time32",
+    time64 = "time64",
+    null = "null",
+    timestamp = "timestamp",
+    decimal = "decimal128",
+    struct = "struct",
+    list_of = "list",
+    list = "list",
+    large_list_of = "large_list",
+    large_list = "large_list",
+    fixed_size_list_of = "fixed_size_list",
+    fixed_size_list = "fixed_size_list",
+    stop("Unrecognized string representation of data type", call. = FALSE)
+  )
+}
 
 # vctrs support -----------------------------------------------------------
 str_dup <- function(x, times) {

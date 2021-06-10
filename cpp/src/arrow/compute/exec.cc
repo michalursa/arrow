@@ -36,6 +36,7 @@
 #include "arrow/compute/registry.h"
 #include "arrow/compute/util_internal.h"
 #include "arrow/datum.h"
+#include "arrow/record_batch.h"
 #include "arrow/scalar.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
@@ -57,6 +58,44 @@ using internal::CpuInfo;
 
 namespace compute {
 
+ExecContext* default_exec_context() {
+  static ExecContext default_ctx;
+  return &default_ctx;
+}
+
+ExecBatch::ExecBatch(const RecordBatch& batch)
+    : values(batch.num_columns()), length(batch.num_rows()) {
+  auto columns = batch.column_data();
+  std::move(columns.begin(), columns.end(), values.begin());
+}
+
+Result<ExecBatch> ExecBatch::Make(std::vector<Datum> values) {
+  if (values.empty()) {
+    return Status::Invalid("Cannot infer ExecBatch length without at least one value");
+  }
+
+  int64_t length = -1;
+  for (const auto& value : values) {
+    if (value.is_scalar()) {
+      if (length == -1) {
+        length = 1;
+      }
+      continue;
+    }
+
+    if (length == -1) {
+      length = value.length();
+      continue;
+    }
+
+    if (length != value.length()) {
+      return Status::Invalid(
+          "Arrays used to construct an ExecBatch must have equal length");
+    }
+  }
+
+  return ExecBatch(std::move(values), length);
+}
 namespace {
 
 Result<std::shared_ptr<Buffer>> AllocateDataBuffer(KernelContext* ctx, int64_t length,
@@ -230,7 +269,7 @@ struct NullGeneralization {
 
     // Do not count the bits if they haven't been counted already
     const int64_t known_null_count = arr.null_count.load();
-    if (known_null_count == 0) {
+    if ((known_null_count == 0) || (arr.buffers[0] == NULLPTR)) {
       return ALL_VALID;
     }
 
@@ -473,6 +512,9 @@ class KernelExecutorImpl : public KernelExecutor {
     if (validity_preallocated_) {
       ARROW_ASSIGN_OR_RAISE(out->buffers[0], kernel_ctx_->AllocateBitmap(length));
     }
+    if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
+      out->null_count = 0;
+    }
     for (size_t i = 0; i < data_preallocated_.size(); ++i) {
       const auto& prealloc = data_preallocated_[i];
       if (prealloc.bit_width >= 0) {
@@ -574,8 +616,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       }
     }
 
-    kernel_->exec(kernel_ctx_, batch, &out);
-    ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+    RETURN_NOT_OK(kernel_->exec(kernel_ctx_, batch, &out));
     if (!preallocate_contiguous_) {
       // If we are producing chunked output rather than one big array, then
       // emit each chunk as soon as it's available
@@ -662,6 +703,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     preallocate_contiguous_ =
         (exec_context()->preallocate_contiguous() && kernel_->can_write_into_slices &&
          validity_preallocated_ && !is_nested(output_descr_.type->id()) &&
+         !is_dictionary(output_descr_.type->id()) &&
          data_preallocated_.size() == static_cast<size_t>(output_num_buffers_ - 1) &&
          std::all_of(data_preallocated_.begin(), data_preallocated_.end(),
                      [](const BufferPreallocation& prealloc) {
@@ -688,10 +730,9 @@ Status PackBatchNoChunks(const std::vector<Datum>& args, ExecBatch* out) {
     switch (arg.kind()) {
       case Datum::SCALAR:
       case Datum::ARRAY:
+      case Datum::CHUNKED_ARRAY:
         length = std::max(arg.length(), length);
         break;
-      case Datum::CHUNKED_ARRAY:
-        return Status::Invalid("Kernel does not support chunked array arguments");
       default:
         DCHECK(false);
         break;
@@ -722,19 +763,15 @@ class VectorExecutor : public KernelExecutorImpl<VectorKernel> {
                     const std::vector<Datum>& outputs) override {
     // If execution yielded multiple chunks (because large arrays were split
     // based on the ExecContext parameters, then the result is a ChunkedArray
-    if (kernel_->output_chunked) {
-      if (HaveChunkedArray(inputs) || outputs.size() > 1) {
-        return ToChunkedArray(outputs, output_descr_.type);
-      } else if (outputs.size() == 1) {
-        // Outputs have just one element
-        return outputs[0];
-      } else {
-        // XXX: In the case where no outputs are omitted, is returning a 0-length
-        // array always the correct move?
-        return MakeArrayOfNull(output_descr_.type, /*length=*/0).ValueOrDie();
-      }
-    } else {
+    if (kernel_->output_chunked && (HaveChunkedArray(inputs) || outputs.size() > 1)) {
+      return ToChunkedArray(outputs, output_descr_.type);
+    } else if (outputs.size() == 1) {
+      // Outputs have just one element
       return outputs[0];
+    } else {
+      // XXX: In the case where no outputs are omitted, is returning a 0-length
+      // array always the correct move?
+      return MakeArrayOfNull(output_descr_.type, /*length=*/0).ValueOrDie();
     }
   }
 
@@ -756,8 +793,7 @@ class VectorExecutor : public KernelExecutorImpl<VectorKernel> {
         output_descr_.shape == ValueDescr::ARRAY) {
       RETURN_NOT_OK(PropagateNulls(kernel_ctx_, batch, out.mutable_array()));
     }
-    kernel_->exec(kernel_ctx_, batch, &out);
-    ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+    RETURN_NOT_OK(kernel_->exec(kernel_ctx_, batch, &out));
     if (!kernel_->finalize) {
       // If there is no result finalizer (e.g. for hash-based functions, we can
       // emit the processed batch right away rather than waiting
@@ -772,8 +808,7 @@ class VectorExecutor : public KernelExecutorImpl<VectorKernel> {
     if (kernel_->finalize) {
       // Intermediate results require post-processing after the execution is
       // completed (possibly involving some accumulated state)
-      kernel_->finalize(kernel_ctx_, &results_);
-      ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+      RETURN_NOT_OK(kernel_->finalize(kernel_ctx_, &results_));
       for (const auto& result : results_) {
         RETURN_NOT_OK(listener->OnResult(result));
       }
@@ -826,8 +861,7 @@ class ScalarAggExecutor : public KernelExecutorImpl<ScalarAggregateKernel> {
     }
 
     Datum out;
-    kernel_->finalize(kernel_ctx_, &out);
-    ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+    RETURN_NOT_OK(kernel_->finalize(kernel_ctx_, &out));
     RETURN_NOT_OK(listener->OnResult(std::move(out)));
     return Status::OK();
   }
@@ -840,23 +874,20 @@ class ScalarAggExecutor : public KernelExecutorImpl<ScalarAggregateKernel> {
 
  private:
   Status Consume(const ExecBatch& batch) {
-    auto batch_state = kernel_->init(kernel_ctx_, {kernel_, *input_descrs_, options_});
-    ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+    // FIXME(ARROW-11840) don't merge *any* aggegates for every batch
+    ARROW_ASSIGN_OR_RAISE(
+        auto batch_state,
+        kernel_->init(kernel_ctx_, {kernel_, *input_descrs_, options_}));
 
     if (batch_state == nullptr) {
-      kernel_ctx_->SetStatus(
-          Status::Invalid("ScalarAggregation requires non-null kernel state"));
-      return kernel_ctx_->status();
+      return Status::Invalid("ScalarAggregation requires non-null kernel state");
     }
 
     KernelContext batch_ctx(exec_context());
     batch_ctx.SetState(batch_state.get());
 
-    kernel_->consume(&batch_ctx, batch);
-    ARROW_CTX_RETURN_IF_ERROR(&batch_ctx);
-
-    kernel_->merge(kernel_ctx_, std::move(*batch_state), state());
-    ARROW_CTX_RETURN_IF_ERROR(kernel_ctx_);
+    RETURN_NOT_OK(kernel_->consume(&batch_ctx, batch));
+    RETURN_NOT_OK(kernel_->merge(kernel_ctx_, std::move(*batch_state), state()));
     return Status::OK();
   }
 

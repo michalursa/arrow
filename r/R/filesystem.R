@@ -273,27 +273,53 @@ FileSystem$from_uri <- function(uri) {
   fs___FileSystemFromUri(uri)
 }
 
-get_path_and_filesystem <- function(x, filesystem = NULL) {
+get_paths_and_filesystem <- function(x, filesystem = NULL) {
   # Wrapper around FileSystem$from_uri that handles local paths
   # and an optional explicit filesystem
   if (inherits(x, "SubTreeFileSystem")) {
     return(list(fs = x$base_fs, path = x$base_path))
   }
-  assert_that(is.string(x))
-  if (is_url(x)) {
+  assert_that(is.character(x))
+  are_urls <- are_urls(x)
+  if (any(are_urls)) {
+    if (!all(are_urls)) {
+      stop("Vectors of mixed paths and URIs are not supported", call. = FALSE)
+    }
     if (!is.null(filesystem)) {
       # Stop? Can't have URL (which yields a fs) and another fs
     }
-    FileSystem$from_uri(x)
+    x <- lapply(x, FileSystem$from_uri)
+    if (length(unique(map(x, ~class(.$fs)))) > 1) {
+      stop(
+        "Vectors of URIs for different file systems are not supported",
+        call. = FALSE
+      )
+    }
+    fs  <- x[[1]]$fs
+    path <- map_chr(x, ~.$path) # singular name "path" used for compatibility
   } else {
-    list(
-      fs = filesystem %||% LocalFileSystem$create(),
-      path = clean_path_abs(x)
-    )
+    fs <- filesystem %||% LocalFileSystem$create()
+    if (inherits(fs, "LocalFileSystem")) {
+      path <- clean_path_abs(x)
+    } else {
+      path <- clean_path_rel(x)
+    }
   }
+  list(
+    fs = fs,
+    path = path
+  )
+}
+
+# variant of the above function that asserts that x is either a scalar string
+# or a SubTreeFileSystem
+get_path_and_filesystem <- function(x, filesystem = NULL) {
+  assert_that(is.string(x) || inherits(x, "SubTreeFileSystem"))
+  get_paths_and_filesystem(x, filesystem)
 }
 
 is_url <- function(x) is.string(x) && grepl("://", x)
+are_urls <- function(x) if (!is.character(x)) FALSE else grepl("://", x)
 
 #' @usage NULL
 #' @format NULL
@@ -372,10 +398,8 @@ default_s3_options <- list(
 #' @return A `SubTreeFileSystem` containing an `S3FileSystem` and the bucket's
 #' relative path. Note that this function's success does not guarantee that you
 #' are authorized to access the bucket's contents.
-#' @examples
-#' if (arrow_with_s3()) {
-#'   bucket <- s3_bucket("ursa-labs-taxi-data")
-#' }
+#' @examplesIf arrow_with_s3()
+#' bucket <- s3_bucket("ursa-labs-taxi-data")
 #' @export
 s3_bucket <- function(bucket, ...) {
   assert_that(is.string(bucket))
@@ -402,6 +426,18 @@ s3_bucket <- function(bucket, ...) {
 #' @rdname FileSystem
 #' @export
 SubTreeFileSystem <- R6Class("SubTreeFileSystem", inherit = FileSystem,
+  public = list(
+    print = function(...) {
+      if (inherits(self$base_fs, "LocalFileSystem")) {
+        cat("SubTreeFileSystem: ", "file://", self$base_path, "\n", sep = "")
+      } else if (inherits(self$base_fs, "S3FileSystem")) {
+        cat("SubTreeFileSystem: ", "s3://", self$base_path, "\n", sep = "")
+      } else {
+        cat("SubTreeFileSystem", "\n", sep = "")
+      }
+      invisible(self)
+    }
+  ),
   active = list(
     base_fs = function() {
       fs___SubTreeFileSystem__base_fs(self)
@@ -418,10 +454,12 @@ SubTreeFileSystem$create <- function(base_path, base_fs = NULL) {
 `$.SubTreeFileSystem` <- function(x, name, ...) {
   # This is to allow delegating methods/properties to the base_fs
   assert_that(is.string(name))
-  if (name %in% ls(x)) {
+  if (name %in% ls(envir = x)) {
     get(name, x)
-  } else {
+  } else if (name %in% ls(envir = x$base_fs)) {
     get(name, x$base_fs)
+  } else {
+    NULL
   }
 }
 
@@ -436,15 +474,13 @@ SubTreeFileSystem$create <- function(base_path, base_fs = NULL) {
 #' copying but may help accommodate high latency FileSystems.
 #' @return Nothing: called for side effects in the file system
 #' @export
-#' @examples
-#' \dontrun{
+#' @examplesIf FALSE
 #' # Copy an S3 bucket's files to a local directory:
 #' copy_files("s3://your-bucket-name", "local-directory")
 #' # Using a FileSystem object
 #' copy_files(s3_bucket("your-bucket-name"), "local-directory")
 #' # Or go the other way, from local to S3
 #' copy_files("local-directory", s3_bucket("your-bucket-name"))
-#' }
 copy_files <- function(from, to, chunk_size = 1024L * 1024L) {
   from <- get_path_and_filesystem(from)
   to <- get_path_and_filesystem(to)

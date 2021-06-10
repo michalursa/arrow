@@ -22,6 +22,15 @@
 
 #define _FILE_OFFSET_BITS 64
 
+#if defined(sun) || defined(__sun)
+// According to https://bugs.python.org/issue1759169#msg82201, __EXTENSIONS__
+// is the best way to enable modern POSIX APIs, such as posix_madvise(), on Solaris.
+// (see also
+// https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/sys/mman.h)
+#undef __EXTENSIONS__
+#define __EXTENSIONS__
+#endif
+
 #include "arrow/util/windows_compatibility.h"  // IWYU pragma: keep
 
 #include <algorithm>
@@ -304,6 +313,26 @@ class WinErrorDetail : public StatusDetail {
 };
 #endif
 
+const char kSignalDetailTypeId[] = "arrow::SignalDetail";
+
+class SignalDetail : public StatusDetail {
+ public:
+  explicit SignalDetail(int signum) : signum_(signum) {}
+
+  const char* type_id() const override { return kSignalDetailTypeId; }
+
+  std::string ToString() const override {
+    std::stringstream ss;
+    ss << "received signal " << signum_;
+    return ss.str();
+  }
+
+  int signum() const { return signum_; }
+
+ protected:
+  int signum_;
+};
+
 }  // namespace
 
 std::shared_ptr<StatusDetail> StatusDetailFromErrno(int errnum) {
@@ -315,6 +344,10 @@ std::shared_ptr<StatusDetail> StatusDetailFromWinError(int errnum) {
   return std::make_shared<WinErrorDetail>(errnum);
 }
 #endif
+
+std::shared_ptr<StatusDetail> StatusDetailFromSignal(int signum) {
+  return std::make_shared<SignalDetail>(signum);
+}
 
 int ErrnoFromStatus(const Status& status) {
   const auto detail = status.detail();
@@ -331,6 +364,14 @@ int WinErrorFromStatus(const Status& status) {
     return checked_cast<const WinErrorDetail&>(*detail).errnum();
   }
 #endif
+  return 0;
+}
+
+int SignalFromStatus(const Status& status) {
+  const auto detail = status.detail();
+  if (detail != nullptr && detail->type_id() == kSignalDetailTypeId) {
+    return checked_cast<const SignalDetail&>(*detail).signum();
+  }
   return 0;
 }
 
@@ -1033,8 +1074,16 @@ Status MemoryMapRemap(void* addr, size_t old_size, size_t new_size, int fildes,
     return StatusFromMmapErrno("MapViewOfFile failed");
   }
   return Status::OK();
+#elif defined(__linux__)
+  if (ftruncate(fildes, new_size) == -1) {
+    return StatusFromMmapErrno("ftruncate failed");
+  }
+  *new_addr = mremap(addr, old_size, new_size, MREMAP_MAYMOVE);
+  if (*new_addr == MAP_FAILED) {
+    return StatusFromMmapErrno("mremap failed");
+  }
+  return Status::OK();
 #else
-#if defined(__APPLE__) || defined(__FreeBSD__)
   // we have to close the mmap first, truncate the file to the new size
   // and recreate the mmap
   if (munmap(addr, old_size) == -1) {
@@ -1050,16 +1099,6 @@ Status MemoryMapRemap(void* addr, size_t old_size, size_t new_size, int fildes,
     return StatusFromMmapErrno("mmap failed");
   }
   return Status::OK();
-#else
-  if (ftruncate(fildes, new_size) == -1) {
-    return StatusFromMmapErrno("ftruncate failed");
-  }
-  *new_addr = mremap(addr, old_size, new_size, MREMAP_MAYMOVE);
-  if (*new_addr == MAP_FAILED) {
-    return StatusFromMmapErrno("mremap failed");
-  }
-  return Status::OK();
-#endif
 #endif
 }
 
@@ -1105,7 +1144,7 @@ Status MemoryAdviseWillNeed(const std::vector<MemoryRegion>& regions) {
     }
   }
   return Status::OK();
-#else
+#elif defined(POSIX_MADV_WILLNEED)
   for (const auto& region : regions) {
     if (region.size != 0) {
       const auto aligned = align_region(region);
@@ -1118,6 +1157,8 @@ Status MemoryAdviseWillNeed(const std::vector<MemoryRegion>& regions) {
       }
     }
   }
+  return Status::OK();
+#else
   return Status::OK();
 #endif
 }
@@ -1482,31 +1523,51 @@ std::string MakeRandomName(int num_chars) {
 }  // namespace
 
 Result<std::unique_ptr<TemporaryDir>> TemporaryDir::Make(const std::string& prefix) {
-  std::string suffix = MakeRandomName(8);
+  const int kNumChars = 8;
+
   NativePathString base_name;
-  ARROW_ASSIGN_OR_RAISE(base_name, StringToNative(prefix + suffix));
+
+  auto MakeBaseName = [&]() {
+    std::string suffix = MakeRandomName(kNumChars);
+    return StringToNative(prefix + suffix);
+  };
+
+  auto TryCreatingDirectory =
+      [&](const NativePathString& base_dir) -> Result<std::unique_ptr<TemporaryDir>> {
+    Status st;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      PlatformFilename fn(base_dir + kNativeSep + base_name + kNativeSep);
+      auto result = CreateDir(fn);
+      if (!result.ok()) {
+        // Probably a permissions error or a non-existing base_dir
+        return nullptr;
+      }
+      if (*result) {
+        return std::unique_ptr<TemporaryDir>(new TemporaryDir(std::move(fn)));
+      }
+      // The random name already exists in base_dir, try with another name
+      st = Status::IOError("Path already exists: '", fn.ToString(), "'");
+      ARROW_ASSIGN_OR_RAISE(base_name, MakeBaseName());
+    }
+    return st;
+  };
+
+  ARROW_ASSIGN_OR_RAISE(base_name, MakeBaseName());
 
   auto base_dirs = GetPlatformTemporaryDirs();
   DCHECK_NE(base_dirs.size(), 0);
 
-  auto st = Status::OK();
-  for (const auto& p : base_dirs) {
-    PlatformFilename fn(p + kNativeSep + base_name + kNativeSep);
-    auto result = CreateDir(fn);
-    if (!result.ok()) {
-      st = result.status();
-      continue;
+  for (const auto& base_dir : base_dirs) {
+    ARROW_ASSIGN_OR_RAISE(auto ptr, TryCreatingDirectory(base_dir));
+    if (ptr) {
+      return std::move(ptr);
     }
-    if (!*result) {
-      // XXX Should we retry with another random name?
-      return Status::IOError("Path already exists: '", fn.ToString(), "'");
-    } else {
-      return std::unique_ptr<TemporaryDir>(new TemporaryDir(std::move(fn)));
-    }
+    // Cannot create in this directory, try the next one
   }
 
-  DCHECK(!st.ok());
-  return st;
+  return Status::IOError(
+      "Cannot create temporary subdirectory in any "
+      "of the platform temporary directories");
 }
 
 TemporaryDir::TemporaryDir(PlatformFilename&& path) : path_(std::move(path)) {}
@@ -1588,22 +1649,64 @@ Result<SignalHandler> SetSignalHandler(int signum, const SignalHandler& handler)
   return Status::OK();
 }
 
+void ReinstateSignalHandler(int signum, SignalHandler::Callback handler) {
+#if !ARROW_HAVE_SIGACTION
+  // Cannot report any errors from signal() (but there shouldn't be any)
+  signal(signum, handler);
+#endif
+}
+
+Status SendSignal(int signum) {
+  if (raise(signum) == 0) {
+    return Status::OK();
+  }
+  if (errno == EINVAL) {
+    return Status::Invalid("Invalid signal number ", signum);
+  }
+  return IOErrorFromErrno(errno, "Failed to raise signal");
+}
+
+Status SendSignalToThread(int signum, uint64_t thread_id) {
+#ifdef _WIN32
+  return Status::NotImplemented("Cannot send signal to specific thread on Windows");
+#else
+  // Have to use a C-style cast because pthread_t can be a pointer *or* integer type
+  int r = pthread_kill((pthread_t)thread_id, signum);  // NOLINT readability-casting
+  if (r == 0) {
+    return Status::OK();
+  }
+  if (r == EINVAL) {
+    return Status::Invalid("Invalid signal number ", signum);
+  }
+  return IOErrorFromErrno(r, "Failed to raise signal");
+#endif
+}
+
 namespace {
+
+int64_t GetPid() {
+#ifdef _WIN32
+  return GetCurrentProcessId();
+#else
+  return getpid();
+#endif
+}
 
 std::mt19937_64 GetSeedGenerator() {
   // Initialize Mersenne Twister PRNG with a true random seed.
+  // Make sure to mix in process id to minimize risks of clashes when parallel testing.
 #ifdef ARROW_VALGRIND
   // Valgrind can crash, hang or enter an infinite loop on std::random_device,
   // use a crude initializer instead.
-  // Make sure to mix in process id to avoid clashes when parallel testing.
   const uint8_t dummy = 0;
   ARROW_UNUSED(dummy);
   std::mt19937_64 seed_gen(reinterpret_cast<uintptr_t>(&dummy) ^
-                           static_cast<uintptr_t>(getpid()));
+                           static_cast<uintptr_t>(GetPid()));
 #else
   std::random_device true_random;
   std::mt19937_64 seed_gen(static_cast<uint64_t>(true_random()) ^
-                           (static_cast<uint64_t>(true_random()) << 32));
+                           (static_cast<uint64_t>(true_random()) << 32) ^
+                           static_cast<uint64_t>(GetPid()));
 #endif
   return seed_gen;
 }

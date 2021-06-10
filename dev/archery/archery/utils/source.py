@@ -69,6 +69,11 @@ class ArrowSources:
         return self.path / "dev"
 
     @property
+    def java(self):
+        """ Returns the java directory of an Arrow sources. """
+        return self.path / "java"
+
+    @property
     def python(self):
         """ Returns the python directory of an Arrow sources. """
         return self.path / "python"
@@ -82,11 +87,6 @@ class ArrowSources:
     def r(self):
         """ Returns the r directory of an Arrow sources. """
         return self.path / "r"
-
-    @property
-    def rust(self):
-        """ Returns the rust directory of an Arrow sources. """
-        return self.path / "rust"
 
     @property
     def git_backed(self):
@@ -182,7 +182,10 @@ class ArrowSources:
         cwd = Path.cwd()
 
         # Implicit via current file
-        this = Path(__file__).parents[4]
+        try:
+            this = Path(__file__).parents[4]
+        except IndexError:
+            this = None
 
         # Implicit via git repository (if archery is installed system wide)
         try:

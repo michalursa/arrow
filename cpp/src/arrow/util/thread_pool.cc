@@ -34,6 +34,84 @@ namespace internal {
 
 Executor::~Executor() = default;
 
+namespace {
+
+struct Task {
+  FnOnce<void()> callable;
+  StopToken stop_token;
+  Executor::StopCallback stop_callback;
+};
+
+}  // namespace
+
+struct SerialExecutor::State {
+  std::deque<Task> task_queue;
+  std::mutex mutex;
+  std::condition_variable wait_for_tasks;
+  bool finished{false};
+};
+
+SerialExecutor::SerialExecutor() : state_(std::make_shared<State>()) {}
+
+SerialExecutor::~SerialExecutor() = default;
+
+Status SerialExecutor::SpawnReal(TaskHints hints, FnOnce<void()> task,
+                                 StopToken stop_token, StopCallback&& stop_callback) {
+  // While the SerialExecutor runs tasks synchronously on its main thread,
+  // SpawnReal may be called from external threads (e.g. when transferring back
+  // from blocking I/O threads), so we need to keep the state alive *and* to
+  // lock its contents.
+  //
+  // Note that holding the lock while notifying the condition variable may
+  // not be sufficient, as some exit paths in the main thread are unlocked.
+  auto state = state_;
+  {
+    std::lock_guard<std::mutex> lk(state->mutex);
+    state->task_queue.push_back(
+        Task{std::move(task), std::move(stop_token), std::move(stop_callback)});
+  }
+  state->wait_for_tasks.notify_one();
+  return Status::OK();
+}
+
+void SerialExecutor::MarkFinished() {
+  // Same comment as SpawnReal above
+  auto state = state_;
+  {
+    std::lock_guard<std::mutex> lk(state->mutex);
+    state->finished = true;
+  }
+  state->wait_for_tasks.notify_one();
+}
+
+void SerialExecutor::RunLoop() {
+  // This is called from the SerialExecutor's main thread, so the
+  // state is guaranteed to be kept alive.
+  std::unique_lock<std::mutex> lk(state_->mutex);
+
+  while (!state_->finished) {
+    while (!state_->task_queue.empty()) {
+      Task task = std::move(state_->task_queue.front());
+      state_->task_queue.pop_front();
+      lk.unlock();
+      if (!task.stop_token.IsStopRequested()) {
+        std::move(task.callable)();
+      } else {
+        if (task.stop_callback) {
+          std::move(task.stop_callback)(task.stop_token.Poll());
+        }
+        // Can't break here because there may be cleanup tasks down the chain we still
+        // need to run.
+      }
+      lk.lock();
+    }
+    // In this case we must be waiting on work from external (e.g. I/O) executors.  Wait
+    // for tasks to arrive (typically via transferred futures).
+    state_->wait_for_tasks.wait(
+        lk, [&] { return state_->finished || !state_->task_queue.empty(); });
+  }
+}
+
 struct ThreadPool::State {
   State() = default;
 
@@ -47,10 +125,14 @@ struct ThreadPool::State {
   std::list<std::thread> workers_;
   // Trashcan for finished threads
   std::vector<std::thread> finished_workers_;
-  std::deque<FnOnce<void()>> pending_tasks_;
+  std::deque<Task> pending_tasks_;
 
   // Desired number of threads
   int desired_capacity_ = 0;
+
+  // Total number of tasks that are either queued or running
+  int tasks_queued_or_running_ = 0;
+
   // Are we shutting down?
   bool please_shutdown_ = false;
   bool quick_shutdown_ = false;
@@ -83,13 +165,24 @@ static void WorkerLoop(std::shared_ptr<ThreadPool::State> state,
       if (should_secede()) {
         break;
       }
+
+      DCHECK_GE(state->tasks_queued_or_running_, 0);
       {
-        FnOnce<void()> task = std::move(state->pending_tasks_.front());
+        Task task = std::move(state->pending_tasks_.front());
         state->pending_tasks_.pop_front();
+        StopToken* stop_token = &task.stop_token;
         lock.unlock();
-        std::move(task)();
+        if (!stop_token->IsStopRequested()) {
+          std::move(task.callable)();
+        } else {
+          if (task.stop_callback) {
+            std::move(task.stop_callback)(stop_token->Poll());
+          }
+        }
+        ARROW_UNUSED(std::move(task));  // release resources before waiting for lock
+        lock.lock();
       }
-      lock.lock();
+      state->tasks_queued_or_running_--;
     }
     // Now either the queue is empty *or* a quick shutdown was requested
     if (state->please_shutdown_ || should_secede()) {
@@ -98,6 +191,7 @@ static void WorkerLoop(std::shared_ptr<ThreadPool::State> state,
     // Wait for next wakeup
     state->cv_.wait(lock);
   }
+  DCHECK_GE(state->tasks_queued_or_running_, 0);
 
   // We're done.  Move our thread object to the trashcan of finished
   // workers.  This has two motivations:
@@ -168,11 +262,14 @@ Status ThreadPool::SetCapacity(int threads) {
   CollectFinishedWorkersUnlocked();
 
   state_->desired_capacity_ = threads;
-  int diff = static_cast<int>(threads - state_->workers_.size());
-  if (diff > 0) {
-    LaunchWorkersUnlocked(diff);
-  } else if (diff < 0) {
-    // Wake threads to ask them to stop
+  // See if we need to increase or decrease the number of running threads
+  const int required = std::min(static_cast<int>(state_->pending_tasks_.size()),
+                                threads - static_cast<int>(state_->workers_.size()));
+  if (required > 0) {
+    // Some tasks are pending, spawn the number of needed threads immediately
+    LaunchWorkersUnlocked(required);
+  } else if (required < 0) {
+    // Excess threads are running, wake them so that they stop
     state_->cv_.notify_all();
   }
   return Status::OK();
@@ -182,6 +279,12 @@ int ThreadPool::GetCapacity() {
   ProtectAgainstFork();
   std::unique_lock<std::mutex> lock(state_->mutex_);
   return state_->desired_capacity_;
+}
+
+int ThreadPool::GetNumTasks() {
+  ProtectAgainstFork();
+  std::unique_lock<std::mutex> lock(state_->mutex_);
+  return state_->tasks_queued_or_running_;
 }
 
 int ThreadPool::GetActualCapacity() {
@@ -228,7 +331,8 @@ void ThreadPool::LaunchWorkersUnlocked(int threads) {
   }
 }
 
-Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task) {
+Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken stop_token,
+                             StopCallback&& stop_callback) {
   {
     ProtectAgainstFork();
     std::lock_guard<std::mutex> lock(state_->mutex_);
@@ -236,7 +340,14 @@ Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task) {
       return Status::Invalid("operation forbidden during or after shutdown");
     }
     CollectFinishedWorkersUnlocked();
-    state_->pending_tasks_.push_back(std::move(task));
+    state_->tasks_queued_or_running_++;
+    if (static_cast<int>(state_->workers_.size()) < state_->tasks_queued_or_running_ &&
+        state_->desired_capacity_ > static_cast<int>(state_->workers_.size())) {
+      // We can still spin up more workers so spin up a new worker
+      LaunchWorkersUnlocked(/*threads=*/1);
+    }
+    state_->pending_tasks_.push_back(
+        {std::move(task), std::move(stop_token), std::move(stop_callback)});
   }
   state_->cv_.notify_one();
   return Status::OK();

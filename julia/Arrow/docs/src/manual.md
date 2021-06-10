@@ -2,7 +2,7 @@
 
 The goal of this documentation is to provide a brief introduction to the arrow data format, then provide a walk-through of the functionality provided in the Arrow.jl Julia package, with an aim to expose a little of the machinery "under the hood" to help explain how things work and how that influences real-world use-cases for the arrow data format.
 
-The best place to learn about the Apache arrow project is [the website itself](https://arrow.apache.org/), specifically the data format [specification](https://arrow.apache.org/docs/format/Columnar.html). Put briefly, the arrow project provides a formal speficiation for how columnar, "table" data can be laid out efficiently in memory to standardize and maximize the ability to share data across languages/platforms. In the current [apache/arrow GitHub repository](https://github.com/apache/arrow), language implementations exist for C++, Java, Go, Javascript, Rust, to name a few. Other database vendors and data processing frameworks/applications have also built support for the arrow format, allowing for a wide breadth of possibility for applications to "speak the data language" of arrow.
+The best place to learn about the Apache arrow project is [the website itself](https://arrow.apache.org/), specifically the data format [specification](https://arrow.apache.org/docs/format/Columnar.html). Put briefly, the arrow project provides a formal specification for how columnar, "table" data can be laid out efficiently in memory to standardize and maximize the ability to share data across languages/platforms. In the current [apache/arrow GitHub repository](https://github.com/apache/arrow), language implementations exist for C++, Java, Go, Javascript, Rust, to name a few. Other database vendors and data processing frameworks/applications have also built support for the arrow format, allowing for a wide breadth of possibility for applications to "speak the data language" of arrow.
 
 The [Arrow.jl](https://github.com/JuliaData/Arrow.jl) Julia package is another implementation, allowing the ability to both read and write data in the arrow format. As a data format, arrow specifies an exact memory layout to be used for columnar table data, and as such, "reading" involves custom Julia objects ([`Arrow.Table`](@ref) and [`Arrow.Stream`](@ref)), which read the *metadata* of an "arrow memory blob", then *wrap* the array data contained therein, having learned the type and size, amongst other properties, from the metadata. Let's take a closer look at what this "reading" of arrow memory really means/looks like.
 
@@ -55,9 +55,49 @@ In the arrow data format, specific logical types are supported, a list of which 
 
 * `Date`, `Time`, `Timestamp`, and `Duration` all have natural Julia defintions in `Dates.Date`, `Dates.Time`, `TimeZones.ZonedDateTime`, and `Dates.Period` subtypes, respectively. 
 * `Char` and `Symbol` Julia types are mapped to arrow string types, with additional metadata of the original Julia type; this allows deserializing directly to `Char` and `Symbol` in Julia, while other language implementations will see these columns as just strings
-* `Decimal128` has no corresponding builtin Julia type, so it's deserialized using a compatible type definition in Arrow.jl itself: `Arrow.Decimal`
+* `Decimal128` and `Decimal256` have no corresponding builtin Julia types, so they're deserialized using a compatible type definition in Arrow.jl itself: `Arrow.Decimal`
 
 Note that when `convert=false` is passed, data will be returned in Arrow.jl-defined types that exactly match the arrow definitions of those types; the authoritative source for how each type represents its data can be found in the arrow [`Schema.fbs`](https://github.com/apache/arrow/blob/master/format/Schema.fbs) file.
+
+#### Custom types
+
+To support writing your custom Julia struct, Arrow.jl utilizes the format's mechanism for "extension types" by storing
+the Julia type name in the field metadata. To "hook in" to this machinery, custom types can just call
+`Arrow.ArrowTypes.registertype!(T, T)`, where `T` is the custom struct type. For example:
+
+```julia
+using Arrow
+
+struct Person
+    id::Int
+    name::String
+end
+
+Arrow.ArrowTypes.registertype!(Person, Person)
+
+table = (col1=[Person(1, "Bob"), Person(2, "Jane")],)
+io = IOBuffer()
+Arrow.write(io, table)
+seekstart(io)
+table2 = Arrow.Table(io)
+```
+
+In this example, we're writing our `table`, which is a NamedTuple with one column named `col1`, which has two
+elements which are instances of our custom `Person` struct. We call `Arrow.Arrowtypes.registertype!` so that
+Arrow.jl knows how to serialize our `Person` struct. We then read the table back in using `Arrow.Table` and
+the table we get back will be an `Arrow.Table`, with a single `Arrow.Struct` column with element type `Person`.
+
+Note that without calling `Arrow.Arrowtypes.registertype!`, we may get into a weird limbo state where we've written
+our table with `Person` structs out as a table, but when reading back in, Arrow.jl doesn't know what a `Person` is;
+deserialization won't fail, but we'll just get a `Namedtuple{(:id, :name), Tuple{Int, String}}` back instead of `Person`.
+
+!!! warning
+
+    If `Arrow.ArrowTypes.registertype!` is called in a downstream package, e.g. to register a custom type defined in
+    that package, it must be called from the `__init__` function of the package's top-level module
+    (see the [Julia docs](https://docs.julialang.org/en/v1/manual/modules/#Module-initialization-and-precompilation)
+    for more on `__init__` functions). Otherwise, the type will only be registered during the precompilation phase,
+    but that state will be lost afterwards (and in particular, the type will not be registered when the package is loaded).
 
 ### `Arrow.Stream`
 

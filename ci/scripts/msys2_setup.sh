@@ -35,6 +35,7 @@ case "${target}" in
     packages+=(${MINGW_PACKAGE_PREFIX}-grpc)
     packages+=(${MINGW_PACKAGE_PREFIX}-gtest)
     packages+=(${MINGW_PACKAGE_PREFIX}-libutf8proc)
+    packages+=(${MINGW_PACKAGE_PREFIX}-libxml2)
     packages+=(${MINGW_PACKAGE_PREFIX}-llvm)
     packages+=(${MINGW_PACKAGE_PREFIX}-lz4)
     packages+=(${MINGW_PACKAGE_PREFIX}-ninja)
@@ -61,12 +62,9 @@ esac
 pacman \
   --needed \
   --noconfirm \
+  --refresh \
   --sync \
   "${packages[@]}"
 
-echo "ARROW_USE_CCACHE=ON" >> $GITHUB_ENV
-echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
-echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
-echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
+"$(dirname $0)/ccache_setup.sh"
 echo "CCACHE_DIR=$(cygpath --absolute --windows ccache)" >> $GITHUB_ENV

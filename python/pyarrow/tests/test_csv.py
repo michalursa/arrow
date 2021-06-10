@@ -25,8 +25,10 @@ import itertools
 import os
 import pickle
 import shutil
+import signal
 import string
 import tempfile
+import threading
 import time
 import unittest
 
@@ -36,7 +38,9 @@ import numpy as np
 
 import pyarrow as pa
 from pyarrow.csv import (
-    open_csv, read_csv, ReadOptions, ParseOptions, ConvertOptions, ISO8601)
+    open_csv, read_csv, ReadOptions, ParseOptions, ConvertOptions, ISO8601,
+    write_csv, WriteOptions)
+from pyarrow.tests import util
 
 
 def generate_col_names():
@@ -48,12 +52,13 @@ def generate_col_names():
             yield first + second
 
 
-def make_random_csv(num_cols=2, num_rows=10, linesep='\r\n'):
+def make_random_csv(num_cols=2, num_rows=10, linesep='\r\n', write_names=True):
     arr = np.random.RandomState(42).randint(0, 1000, size=(num_cols, num_rows))
-    col_names = list(itertools.islice(generate_col_names(), num_cols))
     csv = io.StringIO()
-    csv.write(",".join(col_names))
-    csv.write(linesep)
+    col_names = list(itertools.islice(generate_col_names(), num_cols))
+    if write_names:
+        csv.write(",".join(col_names))
+        csv.write(linesep)
     for row in arr.T:
         csv.write(",".join(map(str, row)))
         csv.write(linesep)
@@ -93,6 +98,7 @@ def check_options_class(cls, **attr_values):
         assert getattr(opts, name) == value
 
 
+# The various options classes need to be picklable for dataset
 def check_options_class_pickling(cls, **attr_values):
     opts = cls(**attr_values)
     new_opts = pickle.loads(pickle.dumps(opts,
@@ -109,7 +115,15 @@ def test_read_options():
                         skip_rows=[0, 3],
                         column_names=[[], ["ab", "cd"]],
                         autogenerate_column_names=[False, True],
-                        encoding=['utf8', 'utf16'])
+                        encoding=['utf8', 'utf16'],
+                        skip_rows_after_names=[0, 27])
+
+    check_options_class_pickling(cls, use_threads=True,
+                                 skip_rows=3,
+                                 column_names=["ab", "cd"],
+                                 autogenerate_column_names=False,
+                                 encoding='utf16',
+                                 skip_rows_after_names=27)
 
     assert opts.block_size > 0
     opts.block_size = 12345
@@ -129,7 +143,6 @@ def test_parse_options():
                         newlines_in_values=[False, True],
                         ignore_empty_lines=[True, False])
 
-    # ParseOptions needs to be picklable for dataset
     check_options_class_pickling(cls, delimiter='x',
                                  escape_char='y',
                                  quote_char=False,
@@ -149,6 +162,14 @@ def test_convert_options():
         include_missing_columns=[False, True],
         auto_dict_encode=[False, True],
         timestamp_parsers=[[], [ISO8601, '%y-%m']])
+
+    check_options_class_pickling(
+        cls, check_utf8=True,
+        strings_can_be_null=False,
+        include_columns=['def', 'abc'],
+        include_missing_columns=False,
+        auto_dict_encode=True,
+        timestamp_parsers=[ISO8601, '%y-%m'])
 
     assert opts.auto_dict_max_cardinality > 0
     opts.auto_dict_max_cardinality = 99999
@@ -201,6 +222,21 @@ def test_convert_options():
     assert opts.true_values == ['T', 'tt']
     assert opts.auto_dict_max_cardinality == 999
     assert opts.timestamp_parsers == [ISO8601, '%Y-%m-%d']
+
+
+def test_write_options():
+    cls = WriteOptions
+    opts = cls()
+
+    check_options_class(
+        cls, include_header=[True, False])
+
+    assert opts.batch_size > 0
+    opts.batch_size = 12345
+    assert opts.batch_size == 12345
+
+    opts = cls(batch_size=9876)
+    assert opts.batch_size == 9876
 
 
 class BaseTestCSVRead:
@@ -284,6 +320,97 @@ class BaseTestCSVRead:
             "ij": ["mn"],
             "kl": ["op"],
         }
+
+    def test_skip_rows_after_names(self):
+        rows = b"ab,cd\nef,gh\nij,kl\nmn,op\n"
+
+        opts = ReadOptions()
+        opts.skip_rows_after_names = 1
+        table = self.read_bytes(rows, read_options=opts)
+        self.check_names(table, ["ab", "cd"])
+        assert table.to_pydict() == {
+            "ab": ["ij", "mn"],
+            "cd": ["kl", "op"],
+        }
+
+        opts.skip_rows_after_names = 3
+        table = self.read_bytes(rows, read_options=opts)
+        self.check_names(table, ["ab", "cd"])
+        assert table.to_pydict() == {
+            "ab": [],
+            "cd": [],
+        }
+
+        opts.skip_rows_after_names = 4
+        table = self.read_bytes(rows, read_options=opts)
+        self.check_names(table, ["ab", "cd"])
+        assert table.to_pydict() == {
+            "ab": [],
+            "cd": [],
+        }
+
+        # Can skip rows with a different number of columns
+        rows = b"abcd\n,,,,,\nij,kl\nmn,op\n"
+        opts.skip_rows_after_names = 2
+        opts.column_names = ["f0", "f1"]
+        table = self.read_bytes(rows, read_options=opts)
+        self.check_names(table, ["f0", "f1"])
+        assert table.to_pydict() == {
+            "f0": ["ij", "mn"],
+            "f1": ["kl", "op"],
+        }
+        opts = ReadOptions()
+
+        # Can skip rows with new lines in the value
+        rows = b'ab,cd\n"e\nf","g\n\nh"\n"ij","k\nl"\nmn,op'
+        opts.skip_rows_after_names = 2
+        parse_opts = ParseOptions()
+        parse_opts.newlines_in_values = True
+        table = self.read_bytes(rows, read_options=opts,
+                                parse_options=parse_opts)
+        self.check_names(table, ["ab", "cd"])
+        assert table.to_pydict() == {
+            "ab": ["mn"],
+            "cd": ["op"],
+        }
+
+        # Can skip rows that are beyond the first block without lexer
+        rows, expected = make_random_csv(num_cols=5, num_rows=1000)
+        opts.skip_rows_after_names = 900
+        opts.block_size = len(rows) / 11
+        table = self.read_bytes(rows, read_options=opts)
+        assert table.schema == expected.schema
+        assert table.num_rows == 100
+        table_dict = table.to_pydict()
+        for name, values in expected.to_pydict().items():
+            assert values[900:] == table_dict[name]
+
+        # Can skip rows that are beyond the first block with lexer
+        table = self.read_bytes(rows, read_options=opts,
+                                parse_options=parse_opts)
+        assert table.schema == expected.schema
+        assert table.num_rows == 100
+        table_dict = table.to_pydict()
+        for name, values in expected.to_pydict().items():
+            assert values[900:] == table_dict[name]
+
+        # Skip rows and skip rows after names
+        rows, expected = make_random_csv(num_cols=5, num_rows=200,
+                                         write_names=False)
+        opts = ReadOptions()
+        opts.skip_rows = 37
+        opts.skip_rows_after_names = 41
+        opts.column_names = expected.schema.names
+        table = self.read_bytes(rows, read_options=opts,
+                                parse_options=parse_opts)
+        assert table.schema == expected.schema
+        assert (table.num_rows ==
+                expected.num_rows - opts.skip_rows -
+                opts.skip_rows_after_names)
+        table_dict = table.to_pydict()
+        for name, values in expected.to_pydict().items():
+            assert (values[opts.skip_rows + opts.skip_rows_after_names:] ==
+                    table_dict[name])
 
     def test_header_column_names(self):
         rows = b"ab,cd\nef,gh\nij,kl\nmn,op\n"
@@ -490,19 +617,24 @@ class BaseTestCSVRead:
 
     def test_simple_timestamps(self):
         # Infer a timestamp column
-        rows = b"a,b\n1970,1970-01-01\n1989,1989-07-14\n"
+        rows = (b"a,b,c\n"
+                b"1970,1970-01-01 00:00:00,1970-01-01 00:00:00.123\n"
+                b"1989,1989-07-14 01:00:00,1989-07-14 01:00:00.123456\n")
         table = self.read_bytes(rows)
         schema = pa.schema([('a', pa.int64()),
-                            ('b', pa.timestamp('s'))])
+                            ('b', pa.timestamp('s')),
+                            ('c', pa.timestamp('ns'))])
         assert table.schema == schema
         assert table.to_pydict() == {
             'a': [1970, 1989],
-            'b': [datetime(1970, 1, 1), datetime(1989, 7, 14)],
+            'b': [datetime(1970, 1, 1), datetime(1989, 7, 14, 1)],
+            'c': [datetime(1970, 1, 1, 0, 0, 0, 123000),
+                  datetime(1989, 7, 14, 1, 0, 0, 123456)],
         }
 
     def test_timestamp_parsers(self):
         # Infer timestamps with custom parsers
-        rows = b"a,b\n1970/01/01,1980-01-01\n1970/01/02,1980-01-02\n"
+        rows = b"a,b\n1970/01/01,1980-01-01 00\n1970/01/02,1980-01-02 00\n"
         opts = ConvertOptions()
 
         table = self.read_bytes(rows, convert_options=opts)
@@ -521,7 +653,7 @@ class BaseTestCSVRead:
         assert table.schema == schema
         assert table.to_pydict() == {
             'a': [datetime(1970, 1, 1), datetime(1970, 1, 2)],
-            'b': ['1980-01-01', '1980-01-02'],
+            'b': ['1980-01-01 00', '1980-01-02 00'],
         }
 
         opts.timestamp_parsers = ['%Y/%m/%d', ISO8601]
@@ -535,15 +667,15 @@ class BaseTestCSVRead:
         }
 
     def test_dates(self):
-        # Dates are inferred as timestamps by default
+        # Dates are inferred as date32 by default
         rows = b"a,b\n1970-01-01,1970-01-02\n1971-01-01,1971-01-02\n"
         table = self.read_bytes(rows)
-        schema = pa.schema([('a', pa.timestamp('s')),
-                            ('b', pa.timestamp('s'))])
+        schema = pa.schema([('a', pa.date32()),
+                            ('b', pa.date32())])
         assert table.schema == schema
         assert table.to_pydict() == {
-            'a': [datetime(1970, 1, 1), datetime(1971, 1, 1)],
-            'b': [datetime(1970, 1, 2), datetime(1971, 1, 2)],
+            'a': [date(1970, 1, 1), date(1971, 1, 1)],
+            'b': [date(1970, 1, 2), date(1971, 1, 2)],
         }
 
         # Can ask for date types explicitly
@@ -556,6 +688,18 @@ class BaseTestCSVRead:
         assert table.to_pydict() == {
             'a': [date(1970, 1, 1), date(1971, 1, 1)],
             'b': [date(1970, 1, 2), date(1971, 1, 2)],
+        }
+
+        # Can ask for timestamp types explicitly
+        opts = ConvertOptions()
+        opts.column_types = {'a': pa.timestamp('s'), 'b': pa.timestamp('ms')}
+        table = self.read_bytes(rows, convert_options=opts)
+        schema = pa.schema([('a', pa.timestamp('s')),
+                            ('b', pa.timestamp('ms'))])
+        assert table.schema == schema
+        assert table.to_pydict() == {
+            'a': [datetime(1970, 1, 1), datetime(1971, 1, 1)],
+            'b': [datetime(1970, 1, 2), datetime(1971, 1, 2)],
         }
 
     def test_auto_dict_encode(self):
@@ -863,6 +1007,48 @@ class BaseTestCSVRead:
         assert table.num_rows == 0
         assert table.column_names == col_names
 
+    def test_cancellation(self):
+        if (threading.current_thread().ident !=
+                threading.main_thread().ident):
+            pytest.skip("test only works from main Python thread")
+        # Skips test if not available
+        raise_signal = util.get_raise_signal()
+
+        # Make the interruptible workload large enough to not finish
+        # before the interrupt comes, even in release mode on fast machines
+        large_csv = b"a,b,c\n" + b"1,2,3\n" * 200_000_000
+
+        def signal_from_thread():
+            time.sleep(0.2)
+            raise_signal(signal.SIGINT)
+
+        t1 = time.time()
+        try:
+            try:
+                t = threading.Thread(target=signal_from_thread)
+                with pytest.raises(KeyboardInterrupt) as exc_info:
+                    t.start()
+                    self.read_bytes(large_csv)
+            finally:
+                t.join()
+        except KeyboardInterrupt:
+            # In case KeyboardInterrupt didn't interrupt `self.read_bytes`
+            # above, at least prevent it from stopping the test suite
+            self.fail("KeyboardInterrupt didn't interrupt CSV reading")
+        dt = time.time() - t1
+        assert dt <= 1.0
+        e = exc_info.value.__context__
+        assert isinstance(e, pa.ArrowCancelled)
+        assert e.signum == signal.SIGINT
+
+    def test_cancellation_disabled(self):
+        # ARROW-12622: reader would segfault when the cancelling signal
+        # handler was not enabled (e.g. if disabled, or if not on the
+        # main thread)
+        t = threading.Thread(target=lambda: self.read_bytes(b"f64\n0.1"))
+        t.start()
+        t.join()
+
 
 class TestSerialCSVRead(BaseTestCSVRead, unittest.TestCase):
 
@@ -872,6 +1058,89 @@ class TestSerialCSVRead(BaseTestCSVRead, unittest.TestCase):
         table = read_csv(*args, **kwargs)
         table.validate(full=validate_full)
         return table
+
+    def test_row_numbers_in_errors(self):
+        """ Row numbers are only correctly counted in serial reads """
+        csv, _ = make_random_csv(4, 100, write_names=True)
+
+        read_options = ReadOptions()
+        read_options.block_size = len(csv) / 3
+        convert_options = ConvertOptions()
+        convert_options.column_types = {"a": pa.int32(), "d": pa.int32()}
+
+        # Test without skip_rows and column names in the csv
+        csv_bad_columns = csv + b"1,2\r\n"
+        with pytest.raises(pa.ArrowInvalid,
+                           match="Row #102: Expected 4 columns, got 2"):
+            self.read_bytes(csv_bad_columns, read_options=read_options,
+                            convert_options=convert_options)
+
+        csv_bad_type = csv + b"a,b,c,d\r\n"
+        message_value = ("In CSV column #0: Row #102: " +
+                         "CSV conversion error to int32: invalid value 'a'")
+        with pytest.raises(pa.ArrowInvalid, match=message_value):
+            self.read_bytes(csv_bad_type, read_options=read_options,
+                            convert_options=convert_options)
+
+        long_row = (b"this is a long row" * 15) + b",3\r\n"
+        csv_bad_columns_long = csv + long_row
+        message_long = ("Row #102: Expected 4 columns, got 2: " +
+                        long_row[0:96].decode("utf-8") + " ...")
+        with pytest.raises(pa.ArrowInvalid, match=message_long):
+            self.read_bytes(csv_bad_columns_long, read_options=read_options,
+                            convert_options=convert_options)
+
+        # Test skipping rows after the names
+        read_options.skip_rows_after_names = 47
+
+        with pytest.raises(pa.ArrowInvalid,
+                           match="Row #102: Expected 4 columns, got 2"):
+            self.read_bytes(csv_bad_columns, read_options=read_options,
+                            convert_options=convert_options)
+
+        with pytest.raises(pa.ArrowInvalid, match=message_value):
+            self.read_bytes(csv_bad_type, read_options=read_options,
+                            convert_options=convert_options)
+
+        with pytest.raises(pa.ArrowInvalid, match=message_long):
+            self.read_bytes(csv_bad_columns_long, read_options=read_options,
+                            convert_options=convert_options)
+
+        read_options.skip_rows_after_names = 0
+
+        # Test without skip_rows and column names not in the csv
+        csv, _ = make_random_csv(4, 100, write_names=False)
+        read_options.column_names = ["a", "b", "c", "d"]
+        csv_bad_columns = csv + b"1,2\r\n"
+        with pytest.raises(pa.ArrowInvalid,
+                           match="Row #101: Expected 4 columns, got 2"):
+            self.read_bytes(csv_bad_columns, read_options=read_options,
+                            convert_options=convert_options)
+
+        csv_bad_columns_long = csv + long_row
+        message_long = ("Row #101: Expected 4 columns, got 2: " +
+                        long_row[0:96].decode("utf-8") + " ...")
+        with pytest.raises(pa.ArrowInvalid, match=message_long):
+            self.read_bytes(csv_bad_columns_long, read_options=read_options,
+                            convert_options=convert_options)
+
+        csv_bad_type = csv + b"a,b,c,d\r\n"
+        message_value = ("In CSV column #0: Row #101: " +
+                         "CSV conversion error to int32: invalid value 'a'")
+        with pytest.raises(pa.ArrowInvalid, match=message_value):
+            self.read_bytes(csv_bad_type, read_options=read_options,
+                            convert_options=convert_options)
+
+        # Test with skip_rows and column names not in the csv
+        read_options.skip_rows = 23
+        with pytest.raises(pa.ArrowInvalid,
+                           match="Row #101: Expected 4 columns, got 2"):
+            self.read_bytes(csv_bad_columns, read_options=read_options,
+                            convert_options=convert_options)
+
+        with pytest.raises(pa.ArrowInvalid, match=message_value):
+            self.read_bytes(csv_bad_type, read_options=read_options,
+                            convert_options=convert_options)
 
 
 class TestParallelCSVRead(BaseTestCSVRead, unittest.TestCase):
@@ -1245,3 +1514,22 @@ def test_read_csv_does_not_close_passed_file_handles():
     buf = io.BytesIO(b"a,b,c\n1,2,3\n4,5,6")
     read_csv(buf)
     assert not buf.closed
+
+
+def test_write_read_round_trip():
+    t = pa.Table.from_arrays([[1, 2, 3], ["a", "b", "c"]], ["c1", "c2"])
+    record_batch = t.to_batches(max_chunksize=4)[0]
+    for data in [t, record_batch]:
+        # Test with header
+        buf = io.BytesIO()
+        write_csv(data, buf, WriteOptions(include_header=True))
+        buf.seek(0)
+        assert t == read_csv(buf)
+
+        # Test without header
+        buf = io.BytesIO()
+        write_csv(data, buf, WriteOptions(include_header=False))
+        buf.seek(0)
+
+        read_options = ReadOptions(column_names=t.column_names)
+        assert t == read_csv(buf, read_options=read_options)

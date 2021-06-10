@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "arrow/extension_type.h"
+#include "arrow/io/memory.h"
 #include "arrow/ipc/api.h"
 #include "arrow/result_internal.h"
 #include "arrow/type.h"
@@ -29,6 +30,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/value_parsing.h"
 
 #include "parquet/arrow/schema_internal.h"
 #include "parquet/exception.h"
@@ -230,6 +232,40 @@ static Status GetTimestampMetadata(const ::arrow::TimestampType& type,
   return Status::OK();
 }
 
+static constexpr char FIELD_ID_KEY[] = "PARQUET:field_id";
+
+std::shared_ptr<::arrow::KeyValueMetadata> FieldIdMetadata(int field_id) {
+  if (field_id >= 0) {
+    return ::arrow::key_value_metadata({FIELD_ID_KEY}, {std::to_string(field_id)});
+  } else {
+    return nullptr;
+  }
+}
+
+int FieldIdFromMetadata(
+    const std::shared_ptr<const ::arrow::KeyValueMetadata>& metadata) {
+  if (!metadata) {
+    return -1;
+  }
+  int key = metadata->FindKey(FIELD_ID_KEY);
+  if (key < 0) {
+    return -1;
+  }
+  std::string field_id_str = metadata->value(key);
+  int field_id;
+  if (::arrow::internal::ParseValue<::arrow::Int32Type>(
+          field_id_str.c_str(), field_id_str.length(), &field_id)) {
+    if (field_id < 0) {
+      // Thrift should convert any negative value to null but normalize to -1 here in case
+      // we later check this in logic.
+      return -1;
+    }
+    return field_id;
+  } else {
+    return -1;
+  }
+}
+
 Status FieldToNode(const std::string& name, const std::shared_ptr<Field>& field,
                    const WriterProperties& properties,
                    const ArrowWriterProperties& arrow_properties, NodePtr* out) {
@@ -386,8 +422,9 @@ Status FieldToNode(const std::string& name, const std::shared_ptr<Field>& field,
     }
   }
 
+  int field_id = FieldIdFromMetadata(field->metadata());
   PARQUET_CATCH_NOT_OK(*out = PrimitiveNode::Make(name, repetition, logical_type, type,
-                                                  length));
+                                                  length, field_id));
 
   return Status::OK();
 }
@@ -450,10 +487,6 @@ Status PopulateLeaf(int column_index, const std::shared_ptr<Field>& field,
 bool HasStructListName(const GroupNode& node) {
   ::arrow::util::string_view name{node.name()};
   return name == "array" || name.ends_with("_tuple");
-}
-
-std::shared_ptr<::arrow::KeyValueMetadata> FieldIdMetadata(int field_id) {
-  return ::arrow::key_value_metadata({"PARQUET:field_id"}, {std::to_string(field_id)});
 }
 
 Status GroupToStruct(const GroupNode& node, LevelInfo current_levels,
@@ -862,11 +895,15 @@ Result<bool> ApplyOriginalStorageMetadata(const Field& origin_field,
     const auto& ts_origin_type =
         checked_cast<const ::arrow::TimestampType&>(*origin_type);
 
-    // If the unit is the same and the data is tz-aware, then set the original
-    // time zone, since Parquet has no native storage for timezones
-    if (ts_type.unit() == ts_origin_type.unit() && ts_type.timezone() == "UTC" &&
-        ts_origin_type.timezone() != "") {
-      inferred->field = inferred->field->WithType(origin_type);
+    // If the data is tz-aware, then set the original time zone, since Parquet
+    // has no native storage for timezones
+    if (ts_type.timezone() == "UTC" && ts_origin_type.timezone() != "") {
+      if (ts_type.unit() == ts_origin_type.unit()) {
+        inferred->field = inferred->field->WithType(origin_type);
+      } else {
+        auto ts_type_new = ::arrow::timestamp(ts_type.unit(), ts_origin_type.timezone());
+        inferred->field = inferred->field->WithType(ts_type_new);
+      }
     }
     modified = true;
   }

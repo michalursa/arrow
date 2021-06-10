@@ -18,10 +18,11 @@
 """Dataset is currently unstable. APIs subject to change without notice."""
 
 import pyarrow as pa
-from pyarrow.util import _stringify_path, _is_path_like
+from pyarrow.util import _is_iterable, _stringify_path, _is_path_like
 
 from pyarrow._dataset import (  # noqa
     CsvFileFormat,
+    CsvFragmentScanOptions,
     Expression,
     Dataset,
     DatasetFactory,
@@ -36,17 +37,19 @@ from pyarrow._dataset import (  # noqa
     HivePartitioning,
     IpcFileFormat,
     IpcFileWriteOptions,
+    InMemoryDataset,
     ParquetDatasetFactory,
     ParquetFactoryOptions,
     ParquetFileFormat,
     ParquetFileFragment,
     ParquetFileWriteOptions,
+    ParquetFragmentScanOptions,
     ParquetReadOptions,
     Partitioning,
     PartitioningFactory,
     RowGroupInfo,
     Scanner,
-    ScanTask,
+    TaggedRecordBatch,
     UnionDataset,
     UnionDatasetFactory,
     _get_partition_keys,
@@ -88,7 +91,8 @@ def scalar(value):
     return Expression._scalar(value)
 
 
-def partitioning(schema=None, field_names=None, flavor=None):
+def partitioning(schema=None, field_names=None, flavor=None,
+                 dictionaries=None):
     """
     Specify a partitioning scheme.
 
@@ -121,6 +125,13 @@ def partitioning(schema=None, field_names=None, flavor=None):
     flavor : str, default None
         The default is DirectoryPartitioning. Specify ``flavor="hive"`` for
         a HivePartitioning.
+    dictionaries : Dict[str, Array]
+        If the type of any field of `schema` is a dictionary type, the
+        corresponding entry of `dictionaries` must be an array containing
+        every value which may be taken by the corresponding column or an
+        error will be raised in parsing. Alternatively, pass `infer` to have
+        Arrow discover the dictionary values, in which case a
+        PartitioningFactory is returned.
 
     Returns
     -------
@@ -140,6 +151,27 @@ def partitioning(schema=None, field_names=None, flavor=None):
     For paths like "/2009/June", the year will be inferred as int32 while month
     will be inferred as string.
 
+    Specify a Schema with dictionary encoding, providing dictionary values:
+
+    >>> partitioning(
+    ...     pa.schema([
+    ...         ("year", pa.int16()),
+    ...         ("month", pa.dictionary(pa.int8(), pa.string()))
+    ...     ]),
+    ...     dictionaries={
+    ...         "month": pa.array(["January", "February", "March"]),
+    ...     })
+
+    Alternatively, specify a Schema with dictionary encoding, but have Arrow
+    infer the dictionary values:
+
+    >>> partitioning(
+    ...     pa.schema([
+    ...         ("year", pa.int16()),
+    ...         ("month", pa.dictionary(pa.int8(), pa.string()))
+    ...     ]),
+    ...     dictionaries="infer")
+
     Create a Hive scheme for a path like "/year=2009/month=11":
 
     >>> partitioning(
@@ -158,7 +190,9 @@ def partitioning(schema=None, field_names=None, flavor=None):
             if field_names is not None:
                 raise ValueError(
                     "Cannot specify both 'schema' and 'field_names'")
-            return DirectoryPartitioning(schema)
+            if dictionaries == 'infer':
+                return DirectoryPartitioning.discover(schema=schema)
+            return DirectoryPartitioning(schema, dictionaries)
         elif field_names is not None:
             if isinstance(field_names, list):
                 return DirectoryPartitioning.discover(field_names)
@@ -175,7 +209,9 @@ def partitioning(schema=None, field_names=None, flavor=None):
             raise ValueError("Cannot specify 'field_names' for flavor 'hive'")
         elif schema is not None:
             if isinstance(schema, pa.Schema):
-                return HivePartitioning(schema)
+                if dictionaries == 'infer':
+                    return HivePartitioning.discover(schema=schema)
+                return HivePartitioning(schema, dictionaries)
             else:
                 raise ValueError(
                     "Expected Schema for 'schema', got {}".format(
@@ -306,7 +342,7 @@ def _ensure_single_source(path, filesystem=None):
         If an URI is passed, then its path component will act as a prefix for
         the file paths.
 
-   Returns
+    Returns
     -------
     (FileSystem, list of str or fs.Selector)
         File system object and either a single item list pointing to a file or
@@ -372,6 +408,13 @@ def _filesystem_dataset(source, schema=None, filesystem=None,
     factory = FileSystemDatasetFactory(fs, paths_or_selector, format, options)
 
     return factory.finish(schema)
+
+
+def _in_memory_dataset(source, schema=None, **kwargs):
+    if any(v is not None for v in kwargs.values()):
+        raise ValueError(
+            "For in-memory datasets, you cannot pass any additional arguments")
+    return InMemoryDataset(source, schema)
 
 
 def _union_dataset(children, schema=None, **kwargs):
@@ -474,7 +517,8 @@ def dataset(source, schema=None, format=None, filesystem=None,
 
     Parameters
     ----------
-    source : path, list of paths, dataset, list of datasets or URI
+    source : path, list of paths, dataset, list of datasets, (list of) batches\
+or tables, iterable of batches, RecordBatchReader, or URI
         Path pointing to a single file:
             Open a FileSystemDataset from a single file.
         Path pointing to a directory:
@@ -490,6 +534,11 @@ def dataset(source, schema=None, format=None, filesystem=None,
             A nested UnionDataset gets constructed, it allows arbitrary
             composition of other datasets.
             Note that additional keyword arguments are not allowed.
+        (List of) batches or tables, iterable of batches, or RecordBatchReader:
+            Create an InMemoryDataset. If an iterable or empty list is given,
+            a schema must also be given. If an iterable or RecordBatchReader
+            is given, the resulting dataset can only be scanned once; further
+            attempts will raise an error.
     schema : Schema, optional
         Optionally provide the Schema for the Dataset, in which case it will
         not be inferred from the source.
@@ -602,7 +651,6 @@ def dataset(source, schema=None, format=None, filesystem=None,
         selector_ignore_prefixes=ignore_prefixes
     )
 
-    # TODO(kszucs): support InMemoryDataset for a table input
     if _is_path_like(source):
         return _filesystem_dataset(source, **kwargs)
     elif isinstance(source, (tuple, list)):
@@ -610,13 +658,19 @@ def dataset(source, schema=None, format=None, filesystem=None,
             return _filesystem_dataset(source, **kwargs)
         elif all(isinstance(elem, Dataset) for elem in source):
             return _union_dataset(source, **kwargs)
+        elif all(isinstance(elem, (pa.RecordBatch, pa.Table))
+                 for elem in source):
+            return _in_memory_dataset(source, **kwargs)
         else:
             unique_types = set(type(elem).__name__ for elem in source)
             type_names = ', '.join('{}'.format(t) for t in unique_types)
             raise TypeError(
-                'Expected a list of path-like or dataset objects. The given '
-                'list contains the following types: {}'.format(type_names)
+                'Expected a list of path-like or dataset objects, or a list '
+                'of batches or tables. The given list contains the following '
+                'types: {}'.format(type_names)
             )
+    elif isinstance(source, (pa.RecordBatch, pa.Table)):
+        return _in_memory_dataset(source, **kwargs)
     else:
         raise TypeError(
             'Expected a path-like, list of path-likes or a list of Datasets '
@@ -635,15 +689,18 @@ def _ensure_write_partitioning(scheme):
 
 def write_dataset(data, base_dir, basename_template=None, format=None,
                   partitioning=None, schema=None,
-                  filesystem=None, file_options=None, use_threads=True):
+                  filesystem=None, file_options=None, use_threads=True,
+                  use_async=False, max_partitions=None):
     """
     Write a dataset to a given format and partitioning.
 
     Parameters
     ----------
-    data : Dataset, Table/RecordBatch, or list of Table/RecordBatch
+    data : Dataset, Table/RecordBatch, RecordBatchReader, list of
+           Table/RecordBatch, or iterable of RecordBatch
         The data to write. This can be a Dataset instance or
-        in-memory Arrow data.
+        in-memory Arrow data. If an iterable is given, the schema must
+        also be given.
     base_dir : str
         The root directory where to write the dataset.
     basename_template : str, optional
@@ -668,20 +725,29 @@ def write_dataset(data, base_dir, basename_template=None, format=None,
     use_threads : bool, default True
         Write files in parallel. If enabled, then maximum parallelism will be
         used determined by the number of available CPU cores.
+    use_async : bool, default False
+        If enabled, an async scanner will be used that should offer
+        better performance with high-latency/highly-parallel filesystems
+        (e.g. S3)
+    max_partitions : int, default 1024
+        Maximum number of partitions any batch may be written into.
     """
-    from pyarrow.fs import LocalFileSystem, _ensure_filesystem
+    from pyarrow.fs import _resolve_filesystem_and_path
 
-    if isinstance(data, Dataset):
-        schema = schema or data.schema
-    elif isinstance(data, (pa.Table, pa.RecordBatch)):
-        schema = schema or data.schema
-        data = [data]
-    elif isinstance(data, list):
+    if isinstance(data, (list, tuple)):
         schema = schema or data[0].schema
-    else:
+        data = InMemoryDataset(data, schema=schema)
+    elif isinstance(data, (pa.RecordBatch, pa.Table)):
+        schema = schema or data.schema
+        data = InMemoryDataset(data, schema=schema)
+    elif isinstance(data, pa.ipc.RecordBatchReader) or _is_iterable(data):
+        data = Scanner.from_batches(data, schema=schema)
+        schema = None
+    elif not isinstance(data, (Dataset, Scanner)):
         raise ValueError(
-            "Only Dataset, Table/RecordBatch or a list of Table/RecordBatch "
-            "objects are supported."
+            "Only Dataset, Scanner, Table/RecordBatch, RecordBatchReader, "
+            "a list of Tables/RecordBatches, or iterable of batches are "
+            "supported."
         )
 
     if format is None and isinstance(data, FileSystemDataset):
@@ -700,15 +766,23 @@ def write_dataset(data, base_dir, basename_template=None, format=None,
     if basename_template is None:
         basename_template = "part-{i}." + format.default_extname
 
+    if max_partitions is None:
+        max_partitions = 1024
+
     partitioning = _ensure_write_partitioning(partitioning)
 
-    if filesystem is None:
-        # fall back to local file system as the default
-        filesystem = LocalFileSystem()
+    filesystem, base_dir = _resolve_filesystem_and_path(base_dir, filesystem)
+
+    if isinstance(data, Dataset):
+        scanner = data.scanner(use_threads=use_threads, use_async=use_async)
     else:
-        filesystem = _ensure_filesystem(filesystem)
+        # scanner was passed directly by the user, in which case a schema
+        # cannot be passed
+        if schema is not None:
+            raise ValueError("Cannot specify a schema when writing a Scanner")
+        scanner = data
 
     _filesystemdataset_write(
-        data, base_dir, basename_template, schema,
-        filesystem, partitioning, file_options, use_threads,
+        scanner, base_dir, basename_template, filesystem, partitioning,
+        file_options, max_partitions
     )

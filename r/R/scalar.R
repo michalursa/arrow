@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-#' @include arrow-package.R
+#' @include arrow-datum.R
 
 #' @title Arrow scalars
 #' @usage NULL
@@ -23,25 +23,48 @@
 #' @docType class
 #'
 #' @description A `Scalar` holds a single value of an Arrow type.
+#' 
+#' @section Methods:
+#'   `$ToString()`: convert to a string
+#'   `$as_vector()`: convert to an R vector
+#'   `$as_array()`: convert to an Arrow `Array`
+#'   `$Equals(other)`: is this Scalar equal to `other`
+#'   `$ApproxEquals(other)`: is this Scalar approximately equal to `other`
+#'   `$is_valid`: is this Scalar valid
+#'   `$null_count`: number of invalid values - 1 or 0 
+#'   `$type`: Scalar type
 #'
 #' @name Scalar
 #' @rdname Scalar
+#' @examplesIf arrow_available()
+#' Scalar$create(pi)
+#' Scalar$create(404)
+#' # If you pass a vector into Scalar$create, you get a list containing your items
+#' Scalar$create(c(1, 2, 3))
+#' 
+#' # Comparisons
+#' my_scalar <- Scalar$create(99)
+#' my_scalar$ApproxEquals(Scalar$create(99.00001)) # FALSE
+#' my_scalar$ApproxEquals(Scalar$create(99.000009)) # TRUE
+#' my_scalar$Equals(Scalar$create(99.000009)) # FALSE
+#' my_scalar$Equals(Scalar$create(99L)) # FALSE (types don't match)
+#' 
+#' my_scalar$ToString()
 #' @export
 Scalar <- R6Class("Scalar",
-  inherit = ArrowObject,
+  inherit = ArrowDatum,
   # TODO: document the methods
   public = list(
     ToString = function() Scalar__ToString(self),
-    cast = function(target_type, safe = TRUE, ...) {
-      opts <- list(
-        to_type = as_type(target_type),
-        allow_int_overflow = !safe,
-        allow_time_truncate = !safe,
-        allow_float_truncate = !safe
-      )
-      call_function("cast", self, options = modifyList(opts, list(...)))
+    type_id = function() Scalar__type(self)$id,
+    as_vector = function() Scalar__as_vector(self),
+    as_array = function() MakeArrayFromScalar(self),
+    Equals = function(other, ...) {
+      inherits(other, "Scalar") && Scalar__Equals(self, other)
     },
-    as_vector = function() Scalar__as_vector(self)
+    ApproxEquals = function(other, ...) {
+      inherits(other, "Scalar") && Scalar__ApproxEquals(self, other)
+    }
   ),
   active = list(
     is_valid = function() Scalar__is_valid(self),
@@ -75,16 +98,4 @@ StructScalar <- R6Class("StructScalar",
 length.Scalar <- function(x) 1L
 
 #' @export
-is.na.Scalar <- function(x) !x$is_valid
-
-#' @export
-as.vector.Scalar <- function(x, mode) x$as_vector()
-
-#' @export
-as.double.Scalar <- as.double.Array
-
-#' @export
-as.integer.Scalar <- as.integer.Array
-
-#' @export
-as.character.Scalar <- as.character.Array
+sort.Scalar <- function(x, decreasing = FALSE, ...) x

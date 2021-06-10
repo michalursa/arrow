@@ -37,6 +37,7 @@ pushd "${ARROW_SITE_DIR}"
 git checkout asf-site
 git checkout -b ${branch_name}
 rm -rf docs/*
+git checkout docs/c_glib/index.html
 popd
 
 pushd "${ARROW_DIR}"
@@ -45,6 +46,7 @@ git checkout "${release_tag}"
 archery docker run \
   -v "${ARROW_SITE_DIR}/docs:/build/docs" \
   -e ARROW_DOCS_VERSION="${version}" \
+  -e UBUNTU=20.10 \
   ubuntu-docs
 
 : ${PUSH:=1}
@@ -54,12 +56,11 @@ if [ ${PUSH} -gt 0 ]; then
   git add docs
   git commit -m "[Website] Update documentations for ${version}"
   git push -u origin ${branch_name}
-  popd
-
   github_url=$(git remote get-url origin | \
                  sed \
                    -e 's,^git@github.com:,https://github.com/,' \
                    -e 's,\.git$,,')
+  popd
 
   echo "Success!"
   echo "Create a pull request:"

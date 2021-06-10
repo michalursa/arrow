@@ -77,6 +77,7 @@ def test_basics(value, ty, klass, deprecated):
     assert s != "else"
     assert hash(s) == hash(s)
     assert s.is_valid is True
+    assert s != None  # noqa: E711
     with pytest.warns(FutureWarning):
         assert isinstance(s, deprecated)
 
@@ -223,6 +224,15 @@ def test_date():
         for d in [d1, d2]:
             s = pa.scalar(d, type=ty)
             assert s.as_py() == d
+
+
+def test_date_cast():
+    # ARROW-10472 - casting fo scalars doesn't segfault
+    scalar = pa.scalar(datetime.datetime(2012, 1, 1), type=pa.timestamp("us"))
+    expected = datetime.date(2012, 1, 1)
+    for ty in [pa.date32(), pa.date64()]:
+        result = scalar.cast(ty)
+        assert result.as_py() == expected
 
 
 def test_time():

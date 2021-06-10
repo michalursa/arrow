@@ -52,7 +52,11 @@ set(Python3_FIND_FRAMEWORK "LAST")
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY true)
 
 set(CMAKE_MACOSX_RPATH 1)
-set(CMAKE_OSX_DEPLOYMENT_TARGET 10.9)
+if(DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+  set(CMAKE_OSX_DEPLOYMENT_TARGET $ENV{MACOSX_DEPLOYMENT_TARGET})
+else()
+  set(CMAKE_OSX_DEPLOYMENT_TARGET 10.9)
+endif()
 
 # Generate a Clang compile_commands.json "compilation database" file for use
 # with various development tools, such as Vim's YouCompleteMe plugin.
@@ -367,10 +371,9 @@ if(PYARROW_BUNDLE_ARROW_CPP)
   endif()
 
   if(MSVC)
-    find_package(ZLIB)
+    # TODO(kszucs): locate msvcp140.dll in a portable fashion and bundle it
     bundle_arrow_import_lib(ARROW_IMPORT_LIB)
     bundle_arrow_import_lib(ARROW_PYTHON_IMPORT_LIB)
-    bundle_arrow_dependency(zlib)
   endif()
 endif()
 
@@ -384,9 +387,11 @@ endif()
 
 set(CYTHON_EXTENSIONS
     lib
-    _fs
     _compute
     _csv
+    _feather
+    _fs
+    _hdfsio
     _json)
 
 set(LINK_LIBS arrow_shared arrow_python_shared)
@@ -499,8 +504,8 @@ if(PYARROW_BUILD_FLIGHT)
       # XXX Hardcoded library names because CMake is too stupid to give us
       # the shared library paths.
       # https://gitlab.kitware.com/cmake/cmake/issues/16210
-      bundle_arrow_dependency(libcrypto-1_1-x64)
-      bundle_arrow_dependency(libssl-1_1-x64)
+      # bundle_arrow_dependency(libcrypto-1_1-x64)
+      # bundle_arrow_dependency(libssl-1_1-x64)
     endif()
   endif()
 

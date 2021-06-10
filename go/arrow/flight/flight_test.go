@@ -19,6 +19,7 @@ package flight_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -65,7 +66,7 @@ func (f *flightServer) ListFlights(c *flight.Criteria, fs flight.FlightService_L
 		}
 
 		fs.Send(&flight.FlightInfo{
-			Schema: ipc.FlightInfoSchemaBytes(recs[0].Schema(), f.getmem()),
+			Schema: flight.SerializeSchema(recs[0].Schema(), f.getmem()),
 			FlightDescriptor: &flight.FlightDescriptor{
 				Type: flight.FlightDescriptor_PATH,
 				Path: []string{name, auth},
@@ -88,13 +89,13 @@ func (f *flightServer) GetSchema(_ context.Context, in *flight.FlightDescriptor)
 		return nil, status.Error(codes.NotFound, "flight not found")
 	}
 
-	return &flight.SchemaResult{Schema: ipc.FlightInfoSchemaBytes(recs[0].Schema(), f.getmem())}, nil
+	return &flight.SchemaResult{Schema: flight.SerializeSchema(recs[0].Schema(), f.getmem())}, nil
 }
 
 func (f *flightServer) DoGet(tkt *flight.Ticket, fs flight.FlightService_DoGetServer) error {
 	recs := arrdata.Records[string(tkt.GetTicket())]
 
-	w := ipc.NewFlightDataWriter(fs, ipc.WithSchema(recs[0].Schema()))
+	w := flight.NewRecordWriter(fs, ipc.WithSchema(recs[0].Schema()))
 	for _, r := range recs {
 		w.Write(r)
 	}
@@ -181,7 +182,7 @@ func TestListFlights(t *testing.T) {
 			t.Fatalf("got unknown flight info: %s", fname)
 		}
 
-		sc, err := ipc.SchemaFromFlightInfo(info.GetSchema())
+		sc, err := flight.DeserializeSchema(info.GetSchema(), f.mem)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -225,7 +226,7 @@ func TestGetSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			schema, err := ipc.SchemaFromFlightInfo(res.GetSchema())
+			schema, err := flight.DeserializeSchema(res.GetSchema(), f.getmem())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -283,7 +284,7 @@ func TestServer(t *testing.T) {
 		t.Error(err)
 	}
 
-	r, err := ipc.NewFlightDataReader(fdata)
+	r, err := flight.NewRecordReader(fdata)
 	if err != nil {
 		t.Error(err)
 	}
@@ -309,5 +310,99 @@ func TestServer(t *testing.T) {
 
 	if numRows != fi.TotalRecords {
 		t.Fatalf("got %d, want %d", numRows, fi.TotalRecords)
+	}
+}
+
+type flightMetadataWriterServer struct{}
+
+func (f *flightMetadataWriterServer) DoGet(tkt *flight.Ticket, fs flight.FlightService_DoGetServer) error {
+	recs := arrdata.Records[string(tkt.GetTicket())]
+
+	w := flight.NewRecordWriter(fs, ipc.WithSchema(recs[0].Schema()))
+	defer w.Close()
+	for idx, r := range recs {
+		w.WriteWithAppMetadata(r, []byte(fmt.Sprintf("%d_%s", idx, string(tkt.GetTicket()))) /*metadata*/)
+	}
+	return nil
+}
+
+func TestFlightWithAppMetadata(t *testing.T) {
+	f := &flightMetadataWriterServer{}
+	s := flight.NewFlightServer(nil)
+	s.RegisterFlightService(&flight.FlightServiceService{DoGet: f.DoGet})
+	s.Init("localhost:0")
+
+	go s.Serve()
+	defer s.Shutdown()
+
+	client, err := flight.NewFlightClient(s.Addr().String(), nil, grpc.WithInsecure())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	fdata, err := client.DoGet(context.Background(), &flight.Ticket{Ticket: []byte("primitives")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := flight.NewRecordReader(fdata)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := arrdata.Records["primitives"]
+	idx := 0
+	for {
+		rec, err := r.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatal(err)
+		}
+
+		appMeta := r.LatestAppMetadata()
+		if !array.RecordEqual(expected[idx], rec) {
+			t.Errorf("flight data stream records for idx: %d don't match: \ngot = %#v\nwant = %#v", idx, rec, expected[idx])
+		}
+
+		exMeta := fmt.Sprintf("%d_primitives", idx)
+		if string(appMeta) != exMeta {
+			t.Errorf("flight data stream application metadata mismatch: got: %v, want: %v\n", string(appMeta), exMeta)
+		}
+		idx++
+	}
+}
+
+type flightErrorReturn struct {}
+
+func (f *flightErrorReturn) DoGet(_ *flight.Ticket, _ flight.FlightService_DoGetServer) error {
+	return status.Error(codes.NotFound, "nofound")
+}
+
+func TestReaderError(t *testing.T) {
+	f := &flightErrorReturn{}
+	s := flight.NewFlightServer(nil)
+	s.RegisterFlightService(&flight.FlightServiceService{DoGet: f.DoGet})
+	s.Init("localhost:0")
+
+	go s.Serve()
+	defer s.Shutdown()
+
+	client, err := flight.NewFlightClient(s.Addr().String(), nil, grpc.WithInsecure())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	fdata, err := client.DoGet(context.Background(), &flight.Ticket{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = flight.NewRecordReader(fdata)
+	if err == nil {
+		t.Fatal("should have errored")
 	}
 }

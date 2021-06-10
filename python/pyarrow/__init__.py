@@ -64,9 +64,11 @@ import pyarrow.lib as _lib
 if _gc_enabled:
     _gc.enable()
 
-from pyarrow.lib import (BuildInfo, VersionInfo,
+from pyarrow.lib import (BuildInfo, RuntimeInfo, VersionInfo,
                          cpp_build_info, cpp_version, cpp_version_info,
-                         cpu_count, set_cpu_count)
+                         runtime_info, cpu_count, set_cpu_count,
+                         enable_signal_handlers,
+                         io_thread_count, set_io_thread_count)
 
 
 def show_versions():
@@ -96,12 +98,14 @@ from pyarrow.lib import (null, bool_,
                          binary, string, utf8,
                          large_binary, large_string, large_utf8,
                          decimal128, decimal256,
-                         list_, large_list, map_, struct, union, dictionary,
+                         list_, large_list, map_, struct,
+                         union, sparse_union, dense_union,
+                         dictionary,
                          field,
                          type_for_alias,
                          DataType, DictionaryType, StructType,
                          ListType, LargeListType, MapType, FixedSizeListType,
-                         UnionType,
+                         UnionType, SparseUnionType, DenseUnionType,
                          TimestampType, Time32Type, Time64Type, DurationType,
                          FixedSizeBinaryType, Decimal128Type, Decimal256Type,
                          BaseExtensionType, ExtensionType,
@@ -155,26 +159,30 @@ from pyarrow.lib import (Buffer, ResizableBuffer, foreign_buffer, py_buffer,
 
 from pyarrow.lib import (MemoryPool, LoggingMemoryPool, ProxyMemoryPool,
                          total_allocated_bytes, set_memory_pool,
-                         default_memory_pool, logging_memory_pool,
-                         proxy_memory_pool, log_memory_allocations,
-                         jemalloc_set_decay_ms)
+                         default_memory_pool, system_memory_pool,
+                         jemalloc_memory_pool, mimalloc_memory_pool,
+                         logging_memory_pool, proxy_memory_pool,
+                         log_memory_allocations, jemalloc_set_decay_ms)
 
 # I/O
-from pyarrow.lib import (HdfsFile, NativeFile, PythonFile,
+from pyarrow.lib import (NativeFile, PythonFile,
                          BufferedInputStream, BufferedOutputStream,
                          CompressedInputStream, CompressedOutputStream,
                          TransformInputStream, transcoding_input_stream,
                          FixedSizeBufferWriter,
                          BufferReader, BufferOutputStream,
                          OSFile, MemoryMappedFile, memory_map,
-                         create_memory_map, have_libhdfs,
-                         MockOutputStream, input_stream, output_stream)
+                         create_memory_map, MockOutputStream,
+                         input_stream, output_stream)
+
+from pyarrow._hdfsio import HdfsFile, have_libhdfs
 
 from pyarrow.lib import (ChunkedArray, RecordBatch, Table, table,
                          concat_arrays, concat_tables)
 
 # Exceptions
-from pyarrow.lib import (ArrowCapacityError,
+from pyarrow.lib import (ArrowCancelled,
+                         ArrowCapacityError,
                          ArrowException,
                          ArrowKeyError,
                          ArrowIndexError,
@@ -244,11 +252,11 @@ if _sys.version_info >= (3, 7):
         if name in _deprecated:
             obj, new_name = _deprecated[name]
             _warnings.warn(_msg.format(name, new_name),
-                           DeprecationWarning, stacklevel=2)
+                           FutureWarning, stacklevel=2)
             return obj
         elif name in _serialization_deprecatd:
             _warnings.warn(_serialization_msg.format(name),
-                           DeprecationWarning, stacklevel=2)
+                           FutureWarning, stacklevel=2)
             return _serialization_deprecatd[name]
 
         raise AttributeError(

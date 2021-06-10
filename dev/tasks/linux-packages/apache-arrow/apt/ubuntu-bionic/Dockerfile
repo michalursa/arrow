@@ -18,8 +18,6 @@
 ARG FROM=ubuntu:bionic
 FROM ${FROM}
 
-COPY qemu-* /usr/bin/
-
 RUN \
   echo "debconf debconf/frontend select Noninteractive" | \
     debconf-set-selections
@@ -34,6 +32,7 @@ RUN \
   apt update ${quiet} && \
   apt install -y -V ${quiet} \
     build-essential \
+    ccache \
     clang-10 \
     cmake \
     devscripts \
@@ -41,7 +40,6 @@ RUN \
     git \
     gtk-doc-tools \
     libboost-filesystem-dev \
-    libboost-regex-dev \
     libboost-system-dev \
     libbrotli-dev \
     libbz2-dev \
@@ -68,6 +66,15 @@ RUN \
     rapidjson-dev \
     tzdata \
     zlib1g-dev && \
+  (echo "includedir=/usr/include" && \
+   echo "libdir=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" && \
+   echo "" && \
+   echo "Name: re2" && \
+   echo "Description: RE2 is a fast, safe, thread-friendly regular expression engine." && \
+   echo "Version: 0.0.0" && \
+   echo "Cflags: -std=c++11 -pthread -I\${includedir}" && \
+   echo "Libs: -pthread -L\${libdir} -lre2") | \
+    tee "/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig/re2.pc" && \
   if apt list | grep '^nvidia-cuda-toolkit/'; then \
     apt install -y -V ${quiet} nvidia-cuda-toolkit; \
   fi && \

@@ -25,10 +25,10 @@ import os
 import pathlib
 import sys
 
+from .benchmark.codec import JsonEncoder
 from .benchmark.compare import RunnerComparator, DEFAULT_THRESHOLD
-from .benchmark.runner import BenchmarkRunner, CppBenchmarkRunner
+from .benchmark.runner import CppBenchmarkRunner, JavaBenchmarkRunner
 from .lang.cpp import CppCMakeDefinition, CppConfiguration
-from .utils.codec import JsonEncoder
 from .utils.lint import linter, python_numpydoc, LintValidationException
 from .utils.logger import logger, ctx as log_ctx
 from .utils.source import ArrowSources, InvalidArrowSource
@@ -120,6 +120,15 @@ def cpp_toolchain_options(cmd):
     return _apply_options(cmd, options)
 
 
+def java_toolchain_options(cmd):
+    options = [
+        click.option("--java-home", metavar="<java_home>",
+                     help="Path to Java Developers Kit."),
+        click.option("--java-options", help="java compiler options."),
+    ]
+    return _apply_options(cmd, options)
+
+
 def _apply_options(cmd, options):
     for option in options:
         cmd = option(cmd)
@@ -132,6 +141,7 @@ def _apply_options(cmd, options):
               help="Specify Arrow source directory")
 # toolchain
 @cpp_toolchain_options
+@java_toolchain_options
 @click.option("--build-type", default=None, type=build_type,
               help="CMake's CMAKE_BUILD_TYPE")
 @click.option("--warn-level", default="production", type=warn_level_type,
@@ -272,7 +282,6 @@ lint_checks = [
     LintCheck('rat',
               "Check all sources files for license texts via Apache RAT."),
     LintCheck('r', "Lint R files."),
-    LintCheck('rust', "Lint Rust files."),
     LintCheck('docker', "Lint Dockerfiles with hadolint."),
 ]
 
@@ -339,7 +348,7 @@ def numpydoc(src, symbols, allow_rule, disallow_rule):
     disallow_rule = disallow_rule or {'GL01', 'SA01', 'EX01', 'ES01'}
     try:
         results = python_numpydoc(symbols, allow_rules=allow_rule,
-                                  disallow_rule=disallow_rule)
+                                  disallow_rules=disallow_rule)
         for result in results:
             result.ok()
     except LintValidationException:
@@ -357,6 +366,11 @@ def benchmark(ctx):
 
 
 def benchmark_common_options(cmd):
+    def check_language(ctx, param, value):
+        if value not in {"cpp", "java"}:
+            raise click.BadParameter("cpp or java is supported now")
+        return value
+
     options = [
         click.option("--src", metavar="<arrow_src>", show_default=True,
                      default=None, callback=validate_arrow_sources,
@@ -367,11 +381,21 @@ def benchmark_common_options(cmd):
         click.option("--output", metavar="<output>",
                      type=click.File("w", encoding="utf8"), default="-",
                      help="Capture output result into file."),
+        click.option("--language", metavar="<lang>", type=str, default="cpp",
+                     show_default=True, callback=check_language,
+                     help="Specify target language for the benchmark"),
+        click.option("--build-extras", type=str, multiple=True,
+                     help="Extra flags/options to pass to mvn build. "
+                     "Can be stacked. For language=java"),
+        click.option("--benchmark-extras", type=str, multiple=True,
+                     help="Extra flags/options to pass to mvn benchmark. "
+                     "Can be stacked. For language=java"),
         click.option("--cmake-extras", type=str, multiple=True,
                      help="Extra flags/options to pass to cmake invocation. "
-                     "Can be stacked"),
+                     "Can be stacked. For language=cpp")
     ]
 
+    cmd = java_toolchain_options(cmd)
     cmd = cpp_toolchain_options(cmd)
     return _apply_options(cmd, options)
 
@@ -392,19 +416,33 @@ def benchmark_filter_options(cmd):
 @click.argument("rev_or_path", metavar="[<rev_or_path>]",
                 default="WORKSPACE", required=False)
 @benchmark_common_options
+@benchmark_filter_options
 @click.pass_context
 def benchmark_list(ctx, rev_or_path, src, preserve, output, cmake_extras,
-                   **kwargs):
+                   java_home, java_options, build_extras, benchmark_extras,
+                   language, **kwargs):
     """ List benchmark suite.
     """
     with tmpdir(preserve=preserve) as root:
         logger.debug("Running benchmark {}".format(rev_or_path))
 
-        conf = CppBenchmarkRunner.default_configuration(
-            cmake_extras=cmake_extras, **kwargs)
+        if language == "cpp":
+            conf = CppBenchmarkRunner.default_configuration(
+                cmake_extras=cmake_extras, **kwargs)
 
-        runner_base = BenchmarkRunner.from_rev_or_path(
-            src, root, rev_or_path, conf)
+            runner_base = CppBenchmarkRunner.from_rev_or_path(
+                src, root, rev_or_path, conf)
+
+        elif language == "java":
+            for key in {'cpp_package_prefix', 'cxx_flags', 'cxx', 'cc'}:
+                del kwargs[key]
+            conf = JavaBenchmarkRunner.default_configuration(
+                java_home=java_home, java_options=java_options,
+                build_extras=build_extras, benchmark_extras=benchmark_extras,
+                **kwargs)
+
+            runner_base = JavaBenchmarkRunner.from_rev_or_path(
+                src, root, rev_or_path, conf)
 
         for b in runner_base.list_benchmarks:
             click.echo(b, file=output)
@@ -415,9 +453,15 @@ def benchmark_list(ctx, rev_or_path, src, preserve, output, cmake_extras,
                 default="WORKSPACE", required=False)
 @benchmark_common_options
 @benchmark_filter_options
+@click.option("--repetitions", type=int, default=-1,
+              help=("Number of repetitions of each benchmark. Increasing "
+                    "may improve result precision. "
+                    "[default: 1 for cpp, 5 for java"))
 @click.pass_context
 def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
-                  suite_filter, benchmark_filter, **kwargs):
+                  java_home, java_options, build_extras, benchmark_extras,
+                  language, suite_filter, benchmark_filter, repetitions,
+                  **kwargs):
     """ Run benchmark suite.
 
     This command will run the benchmark suite for a single build. This is
@@ -428,7 +472,7 @@ def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
 
     When a commit is referenced, a local clone of the arrow sources (specified
     via --src) is performed and the proper branch is created. This is done in
-    a temporary directory which can be left intact with the `---preserve` flag.
+    a temporary directory which can be left intact with the `--preserve` flag.
 
     The special token "WORKSPACE" is reserved to specify the current git
     workspace. This imply that no clone will be performed.
@@ -453,12 +497,29 @@ def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
     with tmpdir(preserve=preserve) as root:
         logger.debug("Running benchmark {}".format(rev_or_path))
 
-        conf = CppBenchmarkRunner.default_configuration(
-            cmake_extras=cmake_extras, **kwargs)
+        if language == "cpp":
+            conf = CppBenchmarkRunner.default_configuration(
+                cmake_extras=cmake_extras, **kwargs)
 
-        runner_base = BenchmarkRunner.from_rev_or_path(
-            src, root, rev_or_path, conf,
-            suite_filter=suite_filter, benchmark_filter=benchmark_filter)
+            repetitions = repetitions if repetitions != -1 else 1
+            runner_base = CppBenchmarkRunner.from_rev_or_path(
+                src, root, rev_or_path, conf,
+                repetitions=repetitions,
+                suite_filter=suite_filter, benchmark_filter=benchmark_filter)
+
+        elif language == "java":
+            for key in {'cpp_package_prefix', 'cxx_flags', 'cxx', 'cc'}:
+                del kwargs[key]
+            conf = JavaBenchmarkRunner.default_configuration(
+                java_home=java_home, java_options=java_options,
+                build_extras=build_extras, benchmark_extras=benchmark_extras,
+                **kwargs)
+
+            repetitions = repetitions if repetitions != -1 else 5
+            runner_base = JavaBenchmarkRunner.from_rev_or_path(
+                src, root, rev_or_path, conf,
+                repetitions=repetitions,
+                benchmark_filter=benchmark_filter)
 
         json.dump(runner_base, output, cls=JsonEncoder)
 
@@ -471,15 +532,19 @@ def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
               help="Regression failure threshold in percentage.")
 @click.option("--repetitions", type=int, default=1, show_default=True,
               help=("Number of repetitions of each benchmark. Increasing "
-                    "may improve result precision."))
+                    "may improve result precision. "
+                    "[default: 1 for cpp, 5 for java"))
+@click.option("--no-counters", type=BOOL, default=False, is_flag=True,
+              help="Hide counters field in diff report.")
 @click.argument("contender", metavar="[<contender>",
                 default=ArrowSources.WORKSPACE, required=False)
 @click.argument("baseline", metavar="[<baseline>]]", default="origin/master",
                 required=False)
 @click.pass_context
-def benchmark_diff(ctx, src, preserve, output, cmake_extras,
-                   suite_filter, benchmark_filter,
-                   repetitions, threshold, contender, baseline, **kwargs):
+def benchmark_diff(ctx, src, preserve, output, language, cmake_extras,
+                   suite_filter, benchmark_filter, repetitions, no_counters,
+                   java_home, java_options, build_extras, benchmark_extras,
+                   threshold, contender, baseline, **kwargs):
     """Compare (diff) benchmark runs.
 
     This command acts like git-diff but for benchmark results.
@@ -495,7 +560,7 @@ def benchmark_diff(ctx, src, preserve, output, cmake_extras,
 
     When a commit is referenced, a local clone of the arrow sources (specified
     via --src) is performed and the proper branch is created. This is done in
-    a temporary directory which can be left intact with the `---preserve` flag.
+    a temporary directory which can be left intact with the `--preserve` flag.
 
     The special token "WORKSPACE" is reserved to specify the current git
     workspace. This imply that no clone will be performed.
@@ -554,25 +619,47 @@ def benchmark_diff(ctx, src, preserve, output, cmake_extras,
         logger.debug("Comparing {} (contender) with {} (baseline)"
                      .format(contender, baseline))
 
-        conf = CppBenchmarkRunner.default_configuration(
-            cmake_extras=cmake_extras, **kwargs)
+        if language == "cpp":
+            conf = CppBenchmarkRunner.default_configuration(
+                cmake_extras=cmake_extras, **kwargs)
 
-        runner_cont = BenchmarkRunner.from_rev_or_path(
-            src, root, contender, conf,
-            repetitions=repetitions,
-            suite_filter=suite_filter,
-            benchmark_filter=benchmark_filter)
-        runner_base = BenchmarkRunner.from_rev_or_path(
-            src, root, baseline, conf,
-            repetitions=repetitions,
-            suite_filter=suite_filter,
-            benchmark_filter=benchmark_filter)
+            repetitions = repetitions if repetitions != -1 else 1
+            runner_cont = CppBenchmarkRunner.from_rev_or_path(
+                src, root, contender, conf,
+                repetitions=repetitions,
+                suite_filter=suite_filter,
+                benchmark_filter=benchmark_filter)
+            runner_base = CppBenchmarkRunner.from_rev_or_path(
+                src, root, baseline, conf,
+                repetitions=repetitions,
+                suite_filter=suite_filter,
+                benchmark_filter=benchmark_filter)
+
+        elif language == "java":
+            for key in {'cpp_package_prefix', 'cxx_flags', 'cxx', 'cc'}:
+                del kwargs[key]
+            conf = JavaBenchmarkRunner.default_configuration(
+                java_home=java_home, java_options=java_options,
+                build_extras=build_extras, benchmark_extras=benchmark_extras,
+                **kwargs)
+
+            repetitions = repetitions if repetitions != -1 else 5
+            runner_cont = JavaBenchmarkRunner.from_rev_or_path(
+                src, root, contender, conf,
+                repetitions=repetitions,
+                benchmark_filter=benchmark_filter)
+            runner_base = JavaBenchmarkRunner.from_rev_or_path(
+                src, root, baseline, conf,
+                repetitions=repetitions,
+                benchmark_filter=benchmark_filter)
 
         runner_comp = RunnerComparator(runner_cont, runner_base, threshold)
 
         # TODO(kszucs): test that the output is properly formatted jsonlines
         comparisons_json = _get_comparisons_as_json(runner_comp.comparisons)
-        formatted = _format_comparisons_with_pandas(comparisons_json)
+        ren_counters = language == "java"
+        formatted = _format_comparisons_with_pandas(comparisons_json,
+                                                    no_counters, ren_counters)
         output.write(formatted)
         output.write('\n')
 
@@ -586,14 +673,33 @@ def _get_comparisons_as_json(comparisons):
     return buf.getvalue()
 
 
-def _format_comparisons_with_pandas(comparisons_json):
+def _format_comparisons_with_pandas(comparisons_json, no_counters,
+                                    ren_counters):
     import pandas as pd
     df = pd.read_json(StringIO(comparisons_json), lines=True)
     # parse change % so we can sort by it
     df['change %'] = df.pop('change').str[:-1].map(float)
-    df = df[['benchmark', 'baseline', 'contender', 'change %', 'counters']]
+    first_regression = len(df) - df['regression'].sum()
+
+    fields = ['benchmark', 'baseline', 'contender', 'change %']
+    if not no_counters:
+        fields += ['counters']
+
+    df = df[fields]
+    if ren_counters:
+        df = df.rename(columns={'counters': 'configurations'})
     df = df.sort_values(by='change %', ascending=False)
-    return df.to_string()
+
+    def labelled(title, df):
+        if len(df) == 0:
+            return ''
+        title += ': ({})'.format(len(df))
+        df_str = df.to_string(index=False)
+        bar = '-' * df_str.index('\n')
+        return '\n'.join([bar, title, bar, df_str])
+
+    return '\n\n'.join([labelled('Non-regressions', df[:first_regression]),
+                        labelled('Regressions', df[first_regression:])])
 
 
 # ----------------------------------------------------------------------
@@ -620,7 +726,8 @@ def _set_default(opt, default):
 @click.option('--with-go', type=bool, default=False,
               help='Include Go in integration tests')
 @click.option('--with-rust', type=bool, default=False,
-              help='Include Rust in integration tests')
+              help='Include Rust in integration tests',
+              envvar="ARCHERY_INTEGRATION_WITH_RUST")
 @click.option('--write_generated_json', default=False,
               help='Generate test JSON to indicated path')
 @click.option('--run-flight', is_flag=True, default=False,
@@ -682,9 +789,7 @@ def integration(with_all=False, random_seed=12345, **args):
               default='-', required=True)
 @click.option('--arrow-token', envvar='ARROW_GITHUB_TOKEN',
               help='OAuth token for responding comment in the arrow repo')
-@click.option('--crossbow-token', '-ct', envvar='CROSSBOW_GITHUB_TOKEN',
-              help='OAuth token for pushing to the crossow repository')
-def trigger_bot(event_name, event_payload, arrow_token, crossbow_token):
+def trigger_bot(event_name, event_payload, arrow_token):
     from .bot import CommentBot, actions
 
     event_payload = json.loads(event_payload.read())
@@ -693,12 +798,32 @@ def trigger_bot(event_name, event_payload, arrow_token, crossbow_token):
     bot.handle(event_name, event_payload)
 
 
+def _mock_compose_calls(compose):
+    from types import MethodType
+    from subprocess import CompletedProcess
+
+    def _mock(compose, executable):
+        def _execute(self, *args, **kwargs):
+            params = ['{}={}'.format(k, v)
+                      for k, v in self.config.params.items()]
+            command = ' '.join(params + [executable] + list(args))
+            click.echo(command)
+            return CompletedProcess([], 0)
+        return MethodType(_execute, compose)
+
+    compose._execute_docker = _mock(compose, executable='docker')
+    compose._execute_compose = _mock(compose, executable='docker-compose')
+
+
 @archery.group('docker')
 @click.option("--src", metavar="<arrow_src>", default=None,
               callback=validate_arrow_sources,
               help="Specify Arrow source directory.")
+@click.option('--dry-run/--execute', default=False,
+              help="Display the docker-compose commands instead of executing "
+                   "them.")
 @click.pass_obj
-def docker_compose(obj, src):
+def docker_compose(obj, src, dry_run):
     """Interact with docker-compose based builds."""
     from .docker import DockerCompose
 
@@ -711,7 +836,59 @@ def docker_compose(obj, src):
 
     # take the docker-compose parameters like PYTHON, PANDAS, UBUNTU from the
     # environment variables to keep the usage similar to docker-compose
-    obj['compose'] = DockerCompose(config_path, params=os.environ)
+    compose = DockerCompose(config_path, params=os.environ)
+    if dry_run:
+        _mock_compose_calls(compose)
+    obj['compose'] = compose
+
+
+@docker_compose.command('build')
+@click.argument('image')
+@click.option('--force-pull/--no-pull', default=True,
+              help="Whether to force pull the image and its ancestor images")
+@click.option('--using-docker-cli', default=False, is_flag=True,
+              envvar='ARCHERY_USE_DOCKER_CLI',
+              help="Use docker CLI directly for building instead of calling "
+                   "docker-compose. This may help to reuse cached layers.")
+@click.option('--using-docker-buildx', default=False, is_flag=True,
+              envvar='ARCHERY_USE_DOCKER_BUILDX',
+              help="Use buildx with docker CLI directly for building instead "
+                   "of calling docker-compose or the plain docker build "
+                   "command. This option makes the build cache reusable "
+                   "across hosts.")
+@click.option('--use-cache/--no-cache', default=True,
+              help="Whether to use cache when building the image and its "
+                   "ancestor images")
+@click.option('--use-leaf-cache/--no-leaf-cache', default=True,
+              help="Whether to use cache when building only the (leaf) image "
+                   "passed as the argument. To disable caching for both the "
+                   "image and its ancestors use --no-cache option.")
+@click.pass_obj
+def docker_compose_build(obj, image, *, force_pull, using_docker_cli,
+                         using_docker_buildx, use_cache, use_leaf_cache):
+    """
+    Execute docker-compose builds.
+    """
+    from .docker import UndefinedImage
+
+    compose = obj['compose']
+
+    using_docker_cli |= using_docker_buildx
+    try:
+        if force_pull:
+            compose.pull(image, pull_leaf=use_leaf_cache,
+                         using_docker=using_docker_cli)
+        compose.build(image, use_cache=use_cache,
+                      use_leaf_cache=use_leaf_cache,
+                      using_docker=using_docker_cli,
+                      using_buildx=using_docker_buildx)
+    except UndefinedImage as e:
+        raise click.ClickException(
+            "There is no service/image defined in docker-compose.yml with "
+            "name: {}".format(str(e))
+        )
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
 
 
 @docker_compose.command('run')
@@ -727,6 +904,16 @@ def docker_compose(obj, src):
               help="Whether to force build the image and its ancestor images")
 @click.option('--build-only', default=False, is_flag=True,
               help="Pull and/or build the image, but do not run it")
+@click.option('--using-docker-cli', default=False, is_flag=True,
+              envvar='ARCHERY_USE_DOCKER_CLI',
+              help="Use docker CLI directly for building instead of calling "
+                   "docker-compose. This may help to reuse cached layers.")
+@click.option('--using-docker-buildx', default=False, is_flag=True,
+              envvar='ARCHERY_USE_DOCKER_BUILDX',
+              help="Use buildx with docker CLI directly for building instead "
+                   "of calling docker-compose or the plain docker build "
+                   "command. This option makes the build cache reusable "
+                   "across hosts.")
 @click.option('--use-cache/--no-cache', default=True,
               help="Whether to use cache when building the image and its "
                    "ancestor images")
@@ -734,15 +921,13 @@ def docker_compose(obj, src):
               help="Whether to use cache when building only the (leaf) image "
                    "passed as the argument. To disable caching for both the "
                    "image and its ancestors use --no-cache option.")
-@click.option('--dry-run/--execute', default=False,
-              help="Display the docker-compose commands instead of executing "
-                   "them.")
 @click.option('--volume', '-v', multiple=True,
               help="Set volume within the container")
 @click.pass_obj
 def docker_compose_run(obj, image, command, *, env, user, force_pull,
-                       force_build, build_only, use_cache, use_leaf_cache,
-                       dry_run, volume):
+                       force_build, build_only, using_docker_cli,
+                       using_docker_buildx, use_cache,
+                       use_leaf_cache, volume):
     """Execute docker-compose builds.
 
     To see the available builds run `archery docker images`.
@@ -776,29 +961,26 @@ def docker_compose_run(obj, image, command, *, env, user, force_pull,
     from .docker import UndefinedImage
 
     compose = obj['compose']
-
-    if dry_run:
-        from types import MethodType
-
-        def _print_command(self, *args, **kwargs):
-            params = ['{}={}'.format(k, v) for k, v in self.params.items()]
-            command = ' '.join(params + ['docker-compose'] + list(args))
-            click.echo(command)
-
-        compose._execute_compose = MethodType(_print_command, compose)
+    using_docker_cli |= using_docker_buildx
 
     env = dict(kv.split('=', 1) for kv in env)
     try:
+        if force_pull:
+            compose.pull(image, pull_leaf=use_leaf_cache,
+                         using_docker=using_docker_cli)
+        if force_build:
+            compose.build(image, use_cache=use_cache,
+                          use_leaf_cache=use_leaf_cache,
+                          using_docker=using_docker_cli,
+                          using_buildx=using_docker_buildx)
+        if build_only:
+            return
         compose.run(
             image,
             command=command,
             env=env,
             user=user,
-            force_pull=force_pull,
-            force_build=force_build,
-            build_only=build_only,
-            use_cache=use_cache,
-            use_leaf_cache=use_leaf_cache,
+            using_docker=using_docker_cli,
             volumes=volume
         )
     except UndefinedImage as e:
@@ -812,16 +994,20 @@ def docker_compose_run(obj, image, command, *, env, user, force_pull,
 
 @docker_compose.command('push')
 @click.argument('image')
-@click.option('--user', '-u', required=True, envvar='ARCHERY_DOCKER_USER',
+@click.option('--user', '-u', required=False, envvar='ARCHERY_DOCKER_USER',
               help='Docker repository username')
-@click.option('--password', '-p', required=True,
+@click.option('--password', '-p', required=False,
               envvar='ARCHERY_DOCKER_PASSWORD',
               help='Docker repository password')
+@click.option('--using-docker-cli', default=False, is_flag=True,
+              help="Use docker CLI directly for building instead of calling "
+                   "docker-compose. This may help to reuse cached layers.")
 @click.pass_obj
-def docker_compose_push(obj, image, user, password):
+def docker_compose_push(obj, image, user, password, using_docker_cli):
     """Push the generated docker-compose image."""
     compose = obj['compose']
-    compose.push(image, user=user, password=password)
+    compose.push(image, user=user, password=password,
+                 using_docker=using_docker_cli)
 
 
 @docker_compose.command('images')
@@ -964,6 +1150,55 @@ def release_cherry_pick(obj, version, dry_run, recreate):
     )
     for commit in release.commits_to_pick():
         click.echo('git cherry-pick {}'.format(commit.hexsha))
+
+
+@archery.group("linking")
+@click.pass_obj
+def linking(obj):
+    """
+    Quick and dirty utilities for checking library linkage.
+    """
+    pass
+
+
+@linking.command("check-dependencies")
+@click.argument("paths", nargs=-1)
+@click.option("--allow", "-a", "allowed", multiple=True,
+              help="Name of the allowed libraries")
+@click.option("--disallow", "-d", "disallowed", multiple=True,
+              help="Name of the disallowed libraries")
+@click.pass_obj
+def linking_check_dependencies(obj, allowed, disallowed, paths):
+    from .linking import check_dynamic_library_dependencies, DependencyError
+
+    allowed, disallowed = set(allowed), set(disallowed)
+    try:
+        for path in map(pathlib.Path, paths):
+            check_dynamic_library_dependencies(path, allowed=allowed,
+                                               disallowed=disallowed)
+    except DependencyError as e:
+        raise click.ClickException(str(e))
+
+
+try:
+    from .crossbow.cli import crossbow  # noqa
+except ImportError as exc:
+    missing_package = exc.name
+
+    @archery.command(
+        'crossbow',
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+        }
+    )
+    def crossbow():
+        raise click.ClickException(
+            "Couldn't import crossbow because of missing dependency: {}"
+            .format(missing_package)
+        )
+else:
+    archery.add_command(crossbow)
 
 
 if __name__ == "__main__":

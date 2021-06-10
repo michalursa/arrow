@@ -4,7 +4,13 @@
 \alias{read_json_arrow}
 \title{Read a JSON file}
 \usage{
-read_json_arrow(file, col_select = NULL, as_data_frame = TRUE, ...)
+read_json_arrow(
+  file,
+  col_select = NULL,
+  as_data_frame = TRUE,
+  schema = NULL,
+  ...
+)
 }
 \arguments{
 \item{file}{A character file name or URI, \code{raw} vector, an Arrow input stream,
@@ -22,16 +28,18 @@ of columns, as used in \code{dplyr::select()}.}
 \item{as_data_frame}{Should the function return a \code{data.frame} (default) or
 an Arrow \link{Table}?}
 
-\item{...}{Additional options, passed to \code{json_table_reader()}}
+\item{schema}{\link{Schema} that describes the table.}
+
+\item{...}{Additional options passed to \code{JsonTableReader$create()}}
 }
 \value{
-A \code{data.frame}, or an Table if \code{as_data_frame = FALSE}.
+A \code{data.frame}, or a Table if \code{as_data_frame = FALSE}.
 }
 \description{
 Using \link{JsonTableReader}
 }
 \examples{
-\donttest{
+\dontshow{if (arrow_available()) (if (getRversion() >= "3.4") withAutoprint else force)(\{ # examplesIf}
   tf <- tempfile()
   on.exit(unlink(tf))
   writeLines('
@@ -40,5 +48,5 @@ Using \link{JsonTableReader}
     { "hello": 0.0, "world": true, "yo": null }
   ', tf, useBytes=TRUE)
   df <- read_json_arrow(tf)
-}
+\dontshow{\}) # examplesIf}
 }
