@@ -190,7 +190,7 @@ Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
     uint32_t total_length = to_offsets[num_rows_];
     uint32_t total_length_to_append = 0;
     for (uint32_t i = 0; i < num_rows_to_append; ++i) {
-      uint16_t row_id = source_row_ids[i];
+      uint16_t row_id = source_row_ids ? source_row_ids[i] : i;
       uint32_t length = from_offsets[row_id + 1] - from_offsets[row_id];
       total_length_to_append += length;
       to_offsets[num_rows_ + i + 1] = total_length + total_length_to_append;
@@ -201,7 +201,7 @@ Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
     const uint8_t* src = from.rows_->data();
     uint8_t* dst = rows_->mutable_data() + total_length;
     for (uint32_t i = 0; i < num_rows_to_append; ++i) {
-      uint16_t row_id = source_row_ids[i];
+      uint16_t row_id = source_row_ids ? source_row_ids[i] : i;
       uint32_t length = from_offsets[row_id + 1] - from_offsets[row_id];
       const uint64_t* src64 =
           reinterpret_cast<const uint64_t*>(src + from_offsets[row_id]);
@@ -216,7 +216,7 @@ Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
     const uint8_t* src = from.rows_->data();
     uint8_t* dst = rows_->mutable_data() + num_rows_ * metadata_.fixed_length;
     for (uint32_t i = 0; i < num_rows_to_append; ++i) {
-      uint16_t row_id = source_row_ids[i];
+      uint16_t row_id = source_row_ids ? source_row_ids[i] : i;
       uint32_t length = metadata_.fixed_length;
       const uint64_t* src64 = reinterpret_cast<const uint64_t*>(src + length * row_id);
       uint64_t* dst64 = reinterpret_cast<uint64_t*>(dst);
@@ -233,7 +233,7 @@ Status KeyEncoder::KeyRowArray::AppendSelectionFrom(const KeyRowArray& from,
   const uint8_t* src_base = from.null_masks_->data();
   uint8_t* dst_base = null_masks_->mutable_data();
   for (uint32_t i = 0; i < num_rows_to_append; ++i) {
-    uint32_t row_id = source_row_ids[i];
+    uint16_t row_id = source_row_ids ? source_row_ids[i] : i;
     int64_t src_byte_offset = row_id * byte_length;
     const uint8_t* src = src_base + src_byte_offset;
     uint8_t* dst = dst_base + dst_byte_offset;

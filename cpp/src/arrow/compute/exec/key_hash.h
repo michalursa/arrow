@@ -23,6 +23,7 @@
 
 #include <cstdint>
 
+#include "arrow/compute/exec/key_encode.h"
 #include "arrow/compute/exec/util.h"
 
 namespace arrow {
@@ -41,12 +42,18 @@ class Hashing {
                           uint32_t* temp_buffer,  // Needs to hold 4 x 32-bit per row
                           uint32_t* hashes);
 
+  static void HashMultiColumn(const std::vector<KeyEncoder::KeyColumnArray>& cols,
+                              KeyEncoder::KeyEncoderContext* ctx, uint32_t* out_hash);
+
  private:
   static const uint32_t PRIME32_1 = 0x9E3779B1;  // 0b10011110001101110111100110110001
   static const uint32_t PRIME32_2 = 0x85EBCA77;  // 0b10000101111010111100101001110111
   static const uint32_t PRIME32_3 = 0xC2B2AE3D;  // 0b11000010101100101010111000111101
   static const uint32_t PRIME32_4 = 0x27D4EB2F;  // 0b00100111110101001110101100101111
   static const uint32_t PRIME32_5 = 0x165667B1;  // 0b00010110010101100110011110110001
+
+  static void HashCombine(uint32_t num_rows, uint32_t* accumulated_hash,
+                          const uint32_t* next_column_hash);
 
   // Avalanche
   static inline uint32_t avalanche_helper(uint32_t acc);

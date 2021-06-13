@@ -165,19 +165,21 @@ void Hashing::hash_varlen_avx2(uint32_t num_rows, const uint32_t* offsets,
 
     __m128i acc = acc_init;
 
-    uint32_t i;
-    for (i = 0; i < (length - 1) / 16; ++i) {
+    if (length) {
+      uint32_t i;
+      for (i = 0; i < (length - 1) / 16; ++i) {
+        __m128i key_stripe = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base) + i);
+        acc = _mm_add_epi32(acc, _mm_mullo_epi32(key_stripe, _mm_set1_epi32(PRIME32_2)));
+        acc = _mm_or_si128(_mm_slli_epi32(acc, 13), _mm_srli_epi32(acc, 32 - 13));
+        acc = _mm_mullo_epi32(acc, _mm_set1_epi32(PRIME32_1));
+      }
       __m128i key_stripe = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base) + i);
+      __m128i mask = _mm_cmpgt_epi8(_mm_set1_epi8(((length - 1) % 16) + 1), sequence);
+      key_stripe = _mm_and_si128(key_stripe, mask);
       acc = _mm_add_epi32(acc, _mm_mullo_epi32(key_stripe, _mm_set1_epi32(PRIME32_2)));
       acc = _mm_or_si128(_mm_slli_epi32(acc, 13), _mm_srli_epi32(acc, 32 - 13));
       acc = _mm_mullo_epi32(acc, _mm_set1_epi32(PRIME32_1));
     }
-    __m128i key_stripe = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base) + i);
-    __m128i mask = _mm_cmpgt_epi8(_mm_set1_epi8(((length - 1) % 16) + 1), sequence);
-    key_stripe = _mm_and_si128(key_stripe, mask);
-    acc = _mm_add_epi32(acc, _mm_mullo_epi32(key_stripe, _mm_set1_epi32(PRIME32_2)));
-    acc = _mm_or_si128(_mm_slli_epi32(acc, 13), _mm_srli_epi32(acc, 32 - 13));
-    acc = _mm_mullo_epi32(acc, _mm_set1_epi32(PRIME32_1));
 
     _mm_storeu_si128(reinterpret_cast<__m128i*>(temp_buffer) + ikey, acc);
   }

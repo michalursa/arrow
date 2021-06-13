@@ -460,6 +460,7 @@ struct GrouperFastImpl : Grouper {
       const std::vector<ValueDescr>& keys, ExecContext* ctx) {
     auto impl = ::arrow::internal::make_unique<GrouperFastImpl>();
     impl->ctx_ = ctx;
+    impl->column_at_a_time_ = true;
 
     RETURN_NOT_OK(impl->temp_stack_.Init(ctx->memory_pool(), 64 * minibatch_size_max_));
     impl->encode_ctx_.hardware_flags =
@@ -504,14 +505,28 @@ struct GrouperFastImpl : Grouper {
                           int num_keys_to_compare, const uint16_t* selection_may_be_null,
                           const uint32_t* group_ids, uint32_t* out_num_keys_mismatch,
                           uint16_t* out_selection_mismatch) {
-      arrow::compute::KeyCompare::CompareRows(
+      if (impl_ptr->column_at_a_time_) {
+        arrow::compute::KeyCompare::CompareColumnsToRows(
+          num_keys_to_compare, selection_may_be_null, group_ids, &impl_ptr->encode_ctx_,
+          out_num_keys_mismatch, out_selection_mismatch,
+          impl_ptr->encoder_.GetBatchColumns(), impl_ptr->rows_);
+      } else {
+        arrow::compute::KeyCompare::CompareRows(
           num_keys_to_compare, selection_may_be_null, group_ids, &impl_ptr->encode_ctx_,
           out_num_keys_mismatch, out_selection_mismatch, impl_ptr->rows_minibatch_,
           impl_ptr->rows_);
+      }          
     };
     auto append_func = [impl_ptr](int num_keys, const uint16_t* selection) {
-      return impl_ptr->rows_.AppendSelectionFrom(impl_ptr->rows_minibatch_, num_keys,
-                                                 selection);
+      if (impl_ptr->column_at_a_time_) {
+        RETURN_NOT_OK(impl_ptr->encoder_.EncodeSelected(&impl_ptr->rows_minibatch_,
+                                                        num_keys, selection));
+        return impl_ptr->rows_.AppendSelectionFrom(impl_ptr->rows_minibatch_, num_keys,
+                                                   nullptr);
+      } else {
+        return impl_ptr->rows_.AppendSelectionFrom(impl_ptr->rows_minibatch_, num_keys,
+                                                   selection);
+      }
     };
     RETURN_NOT_OK(impl->map_.init(impl->encode_ctx_.hardware_flags, ctx->memory_pool(),
                                   impl->encode_ctx_.stack, impl->log_minibatch_max_,
@@ -579,16 +594,22 @@ struct GrouperFastImpl : Grouper {
       encoder_.Encode(start_row, batch_size_next, &rows_minibatch_, cols_);
 
       // Compute hash
-      if (encoder_.row_metadata().is_fixed_length) {
-        Hashing::hash_fixed(encode_ctx_.hardware_flags, batch_size_next,
-                            encoder_.row_metadata().fixed_length, rows_minibatch_.data(1),
-                            minibatch_hashes_.data());
-      } else {
-        auto hash_temp_buf =
-            util::TempVectorHolder<uint32_t>(&temp_stack_, 4 * batch_size_next);
-        Hashing::hash_varlen(encode_ctx_.hardware_flags, batch_size_next,
-                             rows_minibatch_.offsets(), rows_minibatch_.data(2),
-                             hash_temp_buf.mutable_data(), minibatch_hashes_.data());
+      if (column_at_a_time_) {                                                            
+        encoder_.PrepareEncodeSelected(start_row, batch_size_next, cols_);                
+        Hashing::HashMultiColumn(encoder_.GetBatchColumns(), &encode_ctx_,                
+                                 minibatch_hashes_.data());                               
+      } else {                                                                                  
+        if (encoder_.row_metadata().is_fixed_length) {
+          Hashing::hash_fixed(encode_ctx_.hardware_flags, batch_size_next,
+                              encoder_.row_metadata().fixed_length, rows_minibatch_.data(1),
+                              minibatch_hashes_.data());
+        } else {
+          auto hash_temp_buf =
+              util::TempVectorHolder<uint32_t>(&temp_stack_, 4 * batch_size_next);
+          Hashing::hash_varlen(encode_ctx_.hardware_flags, batch_size_next,
+                              rows_minibatch_.offsets(), rows_minibatch_.data(2),
+                              hash_temp_buf.mutable_data(), minibatch_hashes_.data());
+        }
       }
 
       // Map
@@ -718,6 +739,7 @@ struct GrouperFastImpl : Grouper {
   ExecContext* ctx_;
   arrow::util::TempVectorStack temp_stack_;
   arrow::compute::KeyEncoder::KeyEncoderContext encode_ctx_;
+  bool column_at_a_time_;
 
   std::vector<std::shared_ptr<arrow::DataType>> key_types_;
   std::vector<arrow::compute::KeyEncoder::KeyColumnMetadata> col_metadata_;

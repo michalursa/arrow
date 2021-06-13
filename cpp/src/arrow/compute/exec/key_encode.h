@@ -314,6 +314,12 @@ class KeyEncoder {
                                   int64_t num_rows, const KeyRowArray& rows,
                                   std::vector<KeyColumnArray>* cols);
 
+  void PrepareEncodeSelected(int64_t start_row, int64_t num_rows,
+                             const std::vector<KeyColumnArray>& cols);
+  Status EncodeSelected(KeyRowArray* rows, uint32_t num_selected,
+                        const uint16_t* selection);
+  const std::vector<KeyColumnArray>& GetBatchColumns() const { return batch_all_cols_; }
+
  private:
   /// Prepare column array vectors.
   /// Output column arrays represent a range of input column arrays
@@ -357,6 +363,9 @@ class KeyEncoder {
 
   class EncoderBinary {
    public:
+    static void EncodeSelected(uint32_t offset_within_row, KeyRowArray* rows,
+                               const KeyColumnArray& col, uint32_t num_selected,
+                               const uint16_t* selection);   
     static void Encode(uint32_t offset_within_row, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx,
                        KeyColumnArray* temp);
@@ -366,6 +375,12 @@ class KeyEncoder {
     static bool IsInteger(const KeyColumnMetadata& metadata);
 
    private:
+    template <class COPY_FN, class SET_NULL_FN>
+    static void EncodeSelectedImp(uint32_t offset_within_row, KeyRowArray* rows,
+                                  const KeyColumnArray& col, uint32_t num_selected,
+                                  const uint16_t* selection, COPY_FN copy_fn,
+                                  SET_NULL_FN set_null_fn);
+
     template <bool is_row_fixed_length, bool is_encoding, class COPY_FN>
     static inline void EncodeDecodeHelper(uint32_t start_row, uint32_t num_rows,
                                           uint32_t offset_within_row,
@@ -452,6 +467,12 @@ class KeyEncoder {
 
   class EncoderOffsets {
    public:
+    static void GetRowOffsetsSelected(KeyRowArray* rows,
+                                      const std::vector<KeyColumnArray>& cols,
+                                      uint32_t num_selected, const uint16_t* selection);
+    static void EncodeSelected(KeyRowArray* rows, const std::vector<KeyColumnArray>& cols,
+                               uint32_t num_selected, const uint16_t* selection);
+
     // In order not to repeat work twice,
     // encoding combines in a single pass computing of:
     // a) row offsets for varying-length rows
@@ -466,6 +487,11 @@ class KeyEncoder {
                        KeyEncoderContext* ctx);
 
    private:
+    template <bool has_nulls, bool is_first_varbinary>
+    static void EncodeSelectedImp(uint32_t ivarbinary, KeyRowArray* rows,
+                                  const std::vector<KeyColumnArray>& cols,
+                                  uint32_t num_selected, const uint16_t* selection);
+
     static void EncodeImp(uint32_t num_rows_already_processed, KeyRowArray* rows,
                           const std::vector<KeyColumnArray>& varbinary_cols);
 #if defined(ARROW_HAVE_AVX2)
@@ -477,6 +503,10 @@ class KeyEncoder {
 
   class EncoderVarBinary {
    public:
+    static void EncodeSelected(uint32_t ivarbinary, KeyRowArray* rows,
+                               const KeyColumnArray& cols, uint32_t num_selected,
+                               const uint16_t* selection);
+
     static void Encode(uint32_t varbinary_col_id, KeyRowArray* rows,
                        const KeyColumnArray& col, KeyEncoderContext* ctx);
     static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t varbinary_col_id,
@@ -517,6 +547,8 @@ class KeyEncoder {
 
   class EncoderNulls {
    public:
+    static void EncodeSelected(KeyRowArray* rows, const std::vector<KeyColumnArray>& cols,
+                               uint32_t num_selected, const uint16_t* selection);   
     static void Encode(KeyRowArray* rows, const std::vector<KeyColumnArray>& cols,
                        KeyEncoderContext* ctx, KeyColumnArray* temp_vector_16bit);
     static void Decode(uint32_t start_row, uint32_t num_rows, const KeyRowArray& rows,

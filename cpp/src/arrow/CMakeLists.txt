@@ -410,6 +410,7 @@ if(ARROW_COMPUTE)
               compute/exec/key_map.cc
               compute/exec/key_compare.cc
               compute/exec/key_encode.cc
+              compute/exec/key_encode_selected.cc
               compute/exec/util.cc)
 
   append_avx2_src(compute/kernels/aggregate_basic_avx2.cc)
@@ -419,6 +420,8 @@ if(ARROW_COMPUTE)
   append_avx2_src(compute/exec/key_map_avx2.cc)
   append_avx2_src(compute/exec/key_compare_avx2.cc)
   append_avx2_src(compute/exec/key_encode_avx2.cc)
+  append_avx2_src(compute/exec/key_hash_multi.cc)
+  append_avx2_src(compute/exec/key_compare_single.cc)
   append_avx2_src(compute/exec/util_avx2.cc)
 
   list(APPEND ARROW_TESTING_SRCS compute/exec/test_util.cc)
